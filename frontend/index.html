@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steam 游戏推荐</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+    <!-- Header -->
+    <header>
+        <span class="logo">🎮 游戏品鉴师</span>
+        <span class="subtitle">Steam 智能推荐助手</span>
+    </header>
+
+    <!-- Chat messages -->
+    <div id="chat-container">
+        <div class="message message-bot">
+            嗨！我是你的 Steam 游戏品鉴师 🎮<br>
+            告诉我你想玩什么类型的游戏，或者你的预算和偏好，我来帮你推荐！
+        </div>
+    </div>
+
+    <!-- Input bar -->
+    <div id="input-area">
+        <input
+            type="text"
+            id="message-input"
+            placeholder="比如：推荐几款100以内的RPG游戏..."
+            autocomplete="off"
+        >
+        <button id="send-btn">发送</button>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

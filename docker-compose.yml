@@ -1,0 +1,35 @@
+# =============================================================================
+#  Steam 游戏推荐 Agent — Docker Compose 部署
+# =============================================================================
+#  启动：  docker compose up -d
+#  查看：  docker compose logs -f
+#  停止：  docker compose down
+#  更新：  docker compose build --no-cache && docker compose up -d
+# =============================================================================
+
+services:
+  game-agent:
+    build: .
+    container_name: steam-game-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # 容器内数据路径（无需修改）
+      - DB_PATH=/app/data/sqlite/games.db
+      - VECTOR_PATH=/app/data/vector_index
+    volumes:
+      # 持久化游戏数据库 & 向量索引（容器重建后数据不丢失）
+      - game_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  game_data:
+    name: steam-game-agent-data

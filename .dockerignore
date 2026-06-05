@@ -1,0 +1,39 @@
+# =============================================================================
+#  以下文件/目录不会进入 Docker 构建上下文
+# =============================================================================
+
+# ---- Python 虚拟环境 & 编译缓存 ----
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ---- Git & IDE ----
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- 密钥（通过 docker compose env_file 注入，不打包进镜像）----
+.env
+
+# ---- 文档（不需要进镜像）----
+*.md
+!README.md
+
+# ---- Docker 自身文件 ----
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ---- 运行时日志（每次启动重建）----
+data/logs/
+
+# ---- OS 杂项 ----
+.DS_Store
+Thumbs.db

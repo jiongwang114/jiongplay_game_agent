@@ -7,7 +7,11 @@
 
 FROM python:3.11-slim-bookworm
 
-# 系统依赖（chromadb 和 torch 都有预编译 wheel，无需编译工具）
+# ---- 国内镜像加速（解决 PyPI / HuggingFace 被墙问题）----
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV HF_ENDPOINT=https://hf-mirror.com
+
+# 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*

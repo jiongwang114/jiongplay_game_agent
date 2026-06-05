@@ -33,35 +33,51 @@ def _load_prompt() -> str:
 
 class UserProfile:
     """
-    Tracks a user's gaming preferences across messages.
+    Tracks game preferences **per session** across messages.
 
     Every time ``extract_and_update`` is called, the LLM silently extracts
     structured preferences from the user's message and merges them into
-    the profile (new values overwrite old ones).
+    the session-specific profile.
+
+    Keyed by *user_key* (typically ``session_id``) so that concurrent
+    conversations don't pollute each other's preferences.
     """
 
+    _EMPTY_PROFILE: dict = {
+        "genres": [],
+        "budget": None,
+        "owned_games": [],
+        "platforms": [],
+        "mood": None,
+    }
+
     def __init__(self, llm_engine):
-        """
-        *llm_engine* — an ``LLMEngine`` instance used for the extraction call.
-        """
+        """*llm_engine* — an ``LLMEngine`` instance for extraction calls."""
         self._llm = llm_engine
-        self._profile: dict = {
-            "genres": [],
-            "budget": None,
-            "owned_games": [],
-            "platforms": [],
-            "mood": None,
-        }
+        self._profiles: dict[str, dict] = {}  # user_key → profile dict
 
     # ------------------------------------------------------------------
     #  Public API
     # ------------------------------------------------------------------
 
-    async def extract_and_update(self, message: str) -> None:
+    def _get_profile(self, user_key: str) -> dict:
+        """Return (or initialise) the profile for *user_key*."""
+        if user_key not in self._profiles:
+            self._profiles[user_key] = {
+                "genres": [],
+                "budget": None,
+                "owned_games": [],
+                "platforms": [],
+                "mood": None,
+            }
+        return self._profiles[user_key]
+
+    async def extract_and_update(self, user_key: str, message: str) -> None:
         """
         Call the LLM to extract preferences from *message*, then merge
-        the results into the internal profile.
+        into the profile for *user_key*.
         """
+        profile = self._get_profile(user_key)
         prompt_template = _load_prompt()
         prompt = prompt_template.replace("{user_message}", message)
 
@@ -71,52 +87,49 @@ class UserProfile:
         except (json.JSONDecodeError, Exception):
             return  # Silently ignore extraction failures
 
-        # Merge: overwrite scalar fields if the new value is non‑null,
-        #        extend list fields with new items (deduplicate).
         if not isinstance(parsed, dict):
             return
 
-        for key in self._profile:
+        for key in profile:
             if key not in parsed:
                 continue
             new_val = parsed[key]
             if key in ("genres", "owned_games", "platforms"):
                 if isinstance(new_val, list) and new_val:
-                    existing = set(self._profile[key])
+                    existing = set(profile[key])
                     for item in new_val:
                         if isinstance(item, str) and item not in existing:
-                            self._profile[key].append(item)
+                            profile[key].append(item)
                             existing.add(item)
             elif key in ("budget", "mood"):
                 if new_val is not None:
-                    self._profile[key] = new_val
+                    profile[key] = new_val
 
-    def get_summary(self) -> str:
+    def get_summary(self, user_key: str) -> str:
         """
-        Return a natural‑language summary of the profile for injection
-        into the system prompt.
-
-        Returns an empty string if no preferences have been collected yet.
+        Return a natural‑language summary of the profile for *user_key*.
+        Returns empty string if no preferences have been collected yet.
         """
+        profile = self._get_profile(user_key)
         parts = []
 
-        genres = self._profile.get("genres", [])
+        genres = profile.get("genres", [])
         if genres:
             parts.append(f"偏好类型：{'、'.join(genres)}")
 
-        budget = self._profile.get("budget")
+        budget = profile.get("budget")
         if budget is not None:
             parts.append(f"预算上限：{budget} 元")
 
-        owned = self._profile.get("owned_games", [])
+        owned = profile.get("owned_games", [])
         if owned:
             parts.append(f"已拥有游戏：{'、'.join(owned)}")
 
-        platforms = self._profile.get("platforms", [])
+        platforms = profile.get("platforms", [])
         if platforms:
             parts.append(f"平台偏好：{'、'.join(platforms)}")
 
-        mood = self._profile.get("mood")
+        mood = profile.get("mood")
         if mood:
             parts.append(f"当前心情：{mood}")
 
@@ -125,7 +138,11 @@ class UserProfile:
 
         return "用户偏好：" + "；".join(parts)
 
+    def clear(self, user_key: str) -> None:
+        """Remove all collected preferences for *user_key*."""
+        self._profiles.pop(user_key, None)
+
     @property
     def raw(self) -> dict:
-        """Return a copy of the raw profile dict (for debugging)."""
-        return dict(self._profile)
+        """Return a copy of all raw profiles (for debugging)."""
+        return {k: dict(v) for k, v in self._profiles.items()}

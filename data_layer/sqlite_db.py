@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from data_layer.schema import Base, Game
+from data_layer.schema import Base, Conversation, Game, User
 
 
 class GameDB:
@@ -89,3 +89,64 @@ class GameDB:
                 query = query.filter(Game.tags.like(f"%{tag}%"))
 
         return query.order_by(Game.review_score.desc()).limit(limit).all()
+
+    # ------------------------------------------------------------------
+    #  User helpers
+    # ------------------------------------------------------------------
+
+    def create_user(self, username: str, password_hash: str, avatar_seed: str = "") -> User:
+        """Insert a new user. Raises on duplicate username."""
+        import time
+        user = User(
+            username=username,
+            password_hash=password_hash,
+            avatar_seed=avatar_seed or username,
+            created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self.session.add(user)
+        self.session.commit()
+        return user
+
+    def get_user_by_username(self, username: str) -> Optional[User]:
+        return self.session.query(User).filter(User.username == username).first()
+
+    def get_user_by_token(self, token: str) -> Optional[User]:
+        return self.session.query(User).filter(User.token == token).first()
+
+    def set_user_token(self, user: User, token: str):
+        user.token = token
+        self.session.commit()
+
+    # ------------------------------------------------------------------
+    #  Conversation helpers
+    # ------------------------------------------------------------------
+
+    def add_conversation(self, session_id: str, role: str, content: str):
+        """Persist a single chat message."""
+        import time
+        msg = Conversation(
+            session_id=session_id,
+            role=role,
+            content=content,
+            created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self.session.add(msg)
+        self.session.commit()
+
+    def get_conversations(self, session_id: str, limit: int = 20) -> list[Conversation]:
+        """Return recent messages for a session, oldest first."""
+        rows = (
+            self.session.query(Conversation)
+            .filter(Conversation.session_id == session_id)
+            .order_by(Conversation.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(rows))
+
+    def clear_conversations(self, session_id: str):
+        """Delete all messages for a session."""
+        self.session.query(Conversation).filter(
+            Conversation.session_id == session_id
+        ).delete()
+        self.session.commit()

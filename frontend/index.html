@@ -3,34 +3,470 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Steam 游戏推荐</title>
+    <title>Steam 游戏品鉴师 - 智能 Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        steam: {
+                            dark: '#171a21',
+                            panel: '#1b2838',
+                            light: '#2a475e',
+                            accent: '#66c0f4',
+                            hover: '#1f8bca'
+                        }
+                    },
+                    animation: {
+                        'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #2a475e; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #66c0f4; }
+
+        /* 打字机光标动画 */
+        .typing-dot {
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 移动端滚动条隐藏 */
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
     <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="bg-[#121419] text-gray-300 h-screen flex overflow-hidden">
 
-    <!-- Header -->
-    <header>
-        <span class="logo">🎮 游戏品鉴师</span>
-        <span class="subtitle">Steam 智能推荐助手</span>
-    </header>
+    <!-- ================================================================= -->
+    <!--  左侧边栏：用户控制台 & AI 状态 (桌面端可见)                         -->
+    <!-- ================================================================= -->
+    <aside id="desktop-sidebar" class="w-72 bg-steam-panel border-r border-steam-light flex flex-col justify-between hidden md:flex shrink-0 shadow-xl z-10">
+        <div class="p-6 overflow-y-auto">
+            <h1 class="text-xl font-bold text-white flex items-center gap-3 mb-8 tracking-wide">
+                <i class="fa-solid fa-gamepad text-steam-accent text-2xl drop-shadow-[0_0_8px_rgba(102,192,244,0.5)]"></i>
+                游戏品鉴师
+            </h1>
 
-    <!-- Chat messages -->
-    <div id="chat-container">
-        <div class="message message-bot">
-            嗨！我是你的 Steam 游戏品鉴师 🎮<br>
-            告诉我你想玩什么类型的游戏，或者你的预算和偏好，我来帮你推荐！
+            <!-- 用户模块 -->
+            <div class="bg-steam-dark p-4 rounded-xl border border-steam-light/50 shadow-inner mb-6 relative overflow-hidden group">
+                <div class="absolute inset-0 bg-gradient-to-br from-steam-accent/10 to-transparent opacity-0 group-hover:opacity-100 transition duration-500"></div>
+                <div class="flex items-center gap-4 mb-5 relative z-10">
+                    <div class="w-12 h-12 bg-steam-light rounded-full overflow-hidden border-2 border-steam-accent shadow-[0_0_10px_rgba(102,192,244,0.3)]">
+                        <img id="user-avatar" src="https://api.dicebear.com/7.x/adventurer/svg?seed=Alex&backgroundColor=2a475e" alt="avatar" class="w-full h-full object-cover">
+                    </div>
+                    <div>
+                        <p id="user-name" class="text-[15px] text-white font-bold tracking-wide">Player_One</p>
+                        <div class="flex items-center gap-1.5 mt-0.5">
+                            <span id="online-dot" class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                            <p id="online-status" class="text-xs text-green-400">在线并已准备好</p>
+                        </div>
+                    </div>
+                </div>
+
+                <button id="sync-btn" class="w-full bg-steam-light hover:bg-steam-hover text-sm text-white py-2.5 rounded-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-lg relative z-10 font-medium">
+                    <i id="sync-icon" class="fa-brands fa-steam text-lg"></i>
+                    <span id="sync-text">接入 Steam 游戏库</span>
+                </button>
+            </div>
+
+            <!-- AI 状态面板 -->
+            <div class="mt-8">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-microchip"></i> Agent 实时状态
+                </h3>
+                <div class="bg-steam-dark/80 p-4 rounded-xl text-sm space-y-3.5 border border-steam-light/30 shadow-inner">
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">数据源</span>
+                        <span id="data-status" class="text-gray-500 text-xs px-2 py-0.5 bg-gray-800 rounded">未接入</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">偏好倾向</span>
+                        <span id="pref-status" class="text-steam-accent font-medium">-</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">推荐置信度</span>
+                        <span id="confidence-status" class="text-green-400 font-medium">85%</span>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-gray-700/50 relative">
+                        <i class="fa-solid fa-quote-left text-gray-600 absolute -top-2 left-0 text-xs"></i>
+                        <p id="agent-thought" class="text-xs text-gray-400 italic pl-4 leading-relaxed tracking-wide">"等待了解你的游戏喜好..."</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 当前偏好设置 -->
+            <div id="desktop-prefs-display" class="mt-6 hidden">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-sliders"></i> 当前偏好
+                </h3>
+                <div class="bg-steam-dark/80 p-4 rounded-xl text-sm space-y-2.5 border border-steam-light/30 shadow-inner">
+                    <div id="desktop-pref-budget" class="hidden flex justify-between items-center">
+                        <span class="text-gray-400 text-xs">预算</span>
+                        <span class="text-steam-accent font-medium text-xs"></span>
+                    </div>
+                    <div id="desktop-pref-genres" class="hidden">
+                        <span class="text-gray-400 text-xs block mb-1.5">偏好类型</span>
+                        <div class="flex flex-wrap gap-1"></div>
+                    </div>
+                    <div id="desktop-pref-platforms" class="hidden">
+                        <span class="text-gray-400 text-xs block mb-1.5">平台</span>
+                        <div class="flex flex-wrap gap-1"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-6 border-t border-steam-light/50 bg-steam-dark/30">
+            <button id="desktop-login-btn" class="w-full text-left text-sm text-steam-accent hover:text-white transition flex items-center gap-3 mb-4">
+                <i class="fa-solid fa-right-to-bracket w-4"></i> 登录 / 注册
+            </button>
+            <button id="desktop-settings-btn" class="w-full text-left text-sm text-gray-400 hover:text-white transition flex items-center gap-3 mb-4">
+                <i class="fa-solid fa-gear w-4"></i> 偏好设置
+            </button>
+            <button id="desktop-logout-btn" class="w-full text-left text-sm text-red-400 hover:text-red-300 transition flex items-center gap-3">
+                <i class="fa-solid fa-right-from-bracket w-4"></i> 退出登录
+            </button>
+        </div>
+    </aside>
+
+    <!-- ================================================================= -->
+    <!--  右侧：核心对话区                                                    -->
+    <!-- ================================================================= -->
+    <main class="flex-1 flex flex-col relative w-full bg-[#121419]">
+
+        <!-- 移动端顶部导航 (桌面端隐藏) -->
+        <header class="md:hidden bg-steam-panel p-4 flex items-center justify-between border-b border-steam-light z-20">
+            <h1 class="text-lg font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-gamepad text-steam-accent"></i> 游戏品鉴师
+            </h1>
+            <button id="mobile-menu-btn" class="text-steam-accent"><i class="fa-solid fa-bars text-xl"></i></button>
+        </header>
+
+        <!-- 对话记录区 -->
+        <div class="flex-1 overflow-y-auto p-4 md:p-8 space-y-8 scroll-smooth" id="chat-container">
+
+            <!-- AI 欢迎语 -->
+            <div class="flex gap-4" style="animation: fadeIn 0.5s ease-out;">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0 shadow-[0_0_15px_rgba(102,192,244,0.4)]">
+                    <i class="fa-solid fa-robot text-white text-sm"></i>
+                </div>
+                <div class="max-w-[85%] md:max-w-[70%]">
+                    <p class="text-xs text-gray-400 mb-1.5 ml-1 font-medium">Steam 智能品鉴师</p>
+                    <div class="bg-steam-panel p-4 md:p-5 rounded-2xl rounded-tl-none border border-steam-light shadow-lg text-[15px] text-gray-200 leading-relaxed">
+                        <p>嗨！我是你的专属 Steam 游戏推荐 Agent 🎮</p>
+                        <p class="mt-2 text-gray-400">你可以直接告诉我你想玩什么，或者<strong class="text-steam-accent">接入你的 Steam 账号</strong>，让我分析你的游戏库，为你提供更精准的个性化推荐！</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 动态消息将附加在这里 -->
+        </div>
+
+        <!-- 底部交互输入区 -->
+        <div class="p-4 md:p-6 bg-gradient-to-t from-[#0d0f12] via-[#121419] to-transparent pt-12 relative z-10">
+
+            <!-- 快捷引导标签 -->
+            <div class="flex gap-2.5 mb-4 overflow-x-auto pb-2 scrollbar-hide" id="quick-prompts">
+                <!-- 由 app.js 动态渲染 -->
+            </div>
+
+            <!-- 输入框主体 -->
+            <div class="relative bg-steam-panel border border-steam-light/80 rounded-xl flex items-center shadow-2xl focus-within:border-steam-accent focus-within:ring-1 focus-within:ring-steam-accent transition-all duration-300">
+                <button id="attach-btn" class="p-4 text-gray-400 hover:text-steam-accent transition-colors flex-shrink-0" title="上传截图">
+                    <i class="fa-solid fa-paperclip text-lg"></i>
+                </button>
+                <input type="text" id="chat-input" placeholder="输入你的需求，比如：想找个能和朋友一起玩的合作游戏..." class="flex-1 bg-transparent text-white placeholder-gray-500 py-4 px-2 outline-none text-[15px]">
+                <button id="send-btn" class="bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold px-5 md:px-7 py-2.5 rounded-lg mr-2 transition-colors flex items-center gap-2 shadow-[0_0_10px_rgba(102,192,244,0.3)] hover:shadow-[0_0_15px_rgba(102,192,244,0.5)]">
+                    <span class="hidden md:inline">发送</span>
+                    <i class="fa-solid fa-paper-plane"></i>
+                </button>
+            </div>
+            <p class="text-center text-[11px] text-gray-600 mt-3 font-medium">AI 推荐数据仅供参考，具体价格和折扣信息请以 Steam 商店实时页面为准。</p>
+        </div>
+    </main>
+
+    <!-- ================================================================= -->
+    <!--  移动端侧边栏 (遮罩 + 抽屉)                                        -->
+    <!-- ================================================================= -->
+    <div id="sidebar-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="toggleMobileSidebar()"></div>
+    <aside id="mobile-sidebar" class="fixed left-0 top-0 h-full w-72 bg-steam-panel z-40 transform -translate-x-full transition-transform duration-300 overflow-y-auto shadow-2xl">
+        <div class="p-6 overflow-y-auto">
+            <h1 class="text-xl font-bold text-white flex items-center gap-3 mb-8 tracking-wide">
+                <i class="fa-solid fa-gamepad text-steam-accent text-2xl drop-shadow-[0_0_8px_rgba(102,192,244,0.5)]"></i>
+                游戏品鉴师
+            </h1>
+            <div class="bg-steam-dark p-4 rounded-xl border border-steam-light/50 shadow-inner mb-6 relative overflow-hidden group">
+                <div class="flex items-center gap-4 mb-5 relative z-10">
+                    <div class="w-12 h-12 bg-steam-light rounded-full overflow-hidden border-2 border-steam-accent shadow-[0_0_10px_rgba(102,192,244,0.3)]">
+                        <img src="https://api.dicebear.com/7.x/adventurer/svg?seed=Alex&backgroundColor=2a475e" alt="avatar" class="w-full h-full object-cover">
+                    </div>
+                    <div>
+                        <p class="text-[15px] text-white font-bold tracking-wide">Player_One</p>
+                        <div class="flex items-center gap-1.5 mt-0.5">
+                            <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                            <p class="text-xs text-green-400">在线并已准备好</p>
+                        </div>
+                    </div>
+                </div>
+                <button id="mobile-sync-btn" class="w-full bg-steam-light hover:bg-steam-hover text-sm text-white py-2.5 rounded-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-lg relative z-10 font-medium">
+                    <i id="mobile-sync-icon" class="fa-brands fa-steam text-lg"></i>
+                    <span id="mobile-sync-text">接入 Steam 游戏库</span>
+                </button>
+            </div>
+            <div class="mt-8">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-microchip"></i> Agent 实时状态
+                </h3>
+                <div class="bg-steam-dark/80 p-4 rounded-xl text-sm space-y-3.5 border border-steam-light/30 shadow-inner">
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">数据源</span>
+                        <span class="text-gray-500 text-xs px-2 py-0.5 bg-gray-800 rounded" id="mobile-data-status">未接入</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">偏好倾向</span>
+                        <span class="text-steam-accent font-medium" id="mobile-pref-status">-</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">推荐置信度</span>
+                        <span class="text-green-400 font-medium" id="mobile-confidence-status">85%</span>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-gray-700/50 relative">
+                        <i class="fa-solid fa-quote-left text-gray-600 absolute -top-2 left-0 text-xs"></i>
+                        <p class="text-xs text-gray-400 italic pl-4 leading-relaxed tracking-wide" id="mobile-agent-thought">"等待了解你的游戏喜好..."</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 当前偏好设置 -->
+            <div id="mobile-prefs-display" class="mt-6 hidden">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-sliders"></i> 当前偏好
+                </h3>
+                <div class="bg-steam-dark/80 p-4 rounded-xl text-sm space-y-2.5 border border-steam-light/30 shadow-inner">
+                    <div id="mobile-pref-budget" class="hidden flex justify-between items-center">
+                        <span class="text-gray-400 text-xs">预算</span>
+                        <span class="text-steam-accent font-medium text-xs"></span>
+                    </div>
+                    <div id="mobile-pref-genres" class="hidden">
+                        <span class="text-gray-400 text-xs block mb-1.5">偏好类型</span>
+                        <div class="flex flex-wrap gap-1"></div>
+                    </div>
+                    <div id="mobile-pref-platforms" class="hidden">
+                        <span class="text-gray-400 text-xs block mb-1.5">平台</span>
+                        <div class="flex flex-wrap gap-1"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="p-6 border-t border-steam-light/50 bg-steam-dark/30">
+            <button id="mobile-login-btn" class="w-full text-left text-sm text-steam-accent hover:text-white transition flex items-center gap-3 mb-4">
+                <i class="fa-solid fa-right-to-bracket w-4"></i> 登录 / 注册
+            </button>
+            <button id="mobile-settings-btn" class="w-full text-left text-sm text-gray-400 hover:text-white transition flex items-center gap-3 mb-4">
+                <i class="fa-solid fa-gear w-4"></i> 偏好设置
+            </button>
+            <button id="mobile-logout-btn" class="w-full text-left text-sm text-red-400 hover:text-red-300 transition flex items-center gap-3">
+                <i class="fa-solid fa-right-from-bracket w-4"></i> 退出登录
+            </button>
+        </div>
+    </aside>
+
+    <!-- ================================================================= -->
+    <!--  偏好设置弹窗                                                       -->
+    <!-- ================================================================= -->
+    <div id="settings-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+        <div class="absolute inset-0 bg-black/70" onclick="closeSettingsModal()"></div>
+        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[420px] max-w-[95vw] max-h-[85vh] overflow-y-auto shadow-2xl p-6 z-10">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-lg font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-sliders text-steam-accent"></i> 偏好设置
+                </h2>
+                <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-white transition">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+
+            <!-- 预算范围 -->
+            <div class="mb-5">
+                <label class="text-sm text-gray-300 font-medium mb-2 block">
+                    <i class="fa-solid fa-coins text-steam-accent mr-1.5"></i>预算上限 (元)
+                </label>
+                <div class="flex gap-2 flex-wrap" id="budget-options">
+                    <button data-value="50"  class="budget-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">50 元</button>
+                    <button data-value="100" class="budget-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">100 元</button>
+                    <button data-value="200" class="budget-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">200 元</button>
+                    <button data-value="500" class="budget-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">500 元</button>
+                    <button data-value="0"   class="budget-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">不限</button>
+                </div>
+            </div>
+
+            <!-- 偏好类型 -->
+            <div class="mb-5">
+                <label class="text-sm text-gray-300 font-medium mb-2 block">
+                    <i class="fa-solid fa-gamepad text-steam-accent mr-1.5"></i>偏好游戏类型
+                </label>
+                <div class="flex gap-2 flex-wrap" id="genre-options">
+                    <button data-value="RPG"       class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">RPG</button>
+                    <button data-value="FPS"       class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">FPS</button>
+                    <button data-value="策略"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">策略</button>
+                    <button data-value="模拟"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">模拟</button>
+                    <button data-value="动作"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">动作</button>
+                    <button data-value="冒险"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">冒险</button>
+                    <button data-value="独立"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">独立</button>
+                    <button data-value="开放世界"  class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">开放世界</button>
+                    <button data-value="魂类"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">魂类</button>
+                    <button data-value="休闲"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">休闲</button>
+                    <button data-value="恐怖"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">恐怖</button>
+                    <button data-value="生存"      class="genre-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">生存</button>
+                </div>
+            </div>
+
+            <!-- 平台偏好 -->
+            <div class="mb-6">
+                <label class="text-sm text-gray-300 font-medium mb-2 block">
+                    <i class="fa-solid fa-display text-steam-accent mr-1.5"></i>平台偏好
+                </label>
+                <div class="flex gap-2 flex-wrap" id="platform-options">
+                    <button data-value="单机" class="platform-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">单机</button>
+                    <button data-value="多人" class="platform-chip px-3 py-1.5 rounded-lg border border-gray-600 text-xs text-gray-300 hover:border-steam-accent hover:text-steam-accent transition">多人联机</button>
+                </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="flex gap-3">
+                <button onclick="saveSettings()" class="flex-1 bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2 shadow-lg">
+                    <i class="fa-solid fa-check"></i> 保存设置
+                </button>
+                <button onclick="closeSettingsModal()" class="flex-1 bg-steam-dark border border-steam-light text-gray-300 py-2.5 rounded-lg hover:bg-steam-light transition">
+                    取消
+                </button>
+            </div>
         </div>
     </div>
 
-    <!-- Input bar -->
-    <div id="input-area">
-        <input
-            type="text"
-            id="message-input"
-            placeholder="比如：推荐几款100以内的RPG游戏..."
-            autocomplete="off"
-        >
-        <button id="send-btn">发送</button>
+    <!-- ================================================================= -->
+    <!--  退出登录确认弹窗                                                    -->
+    <!-- ================================================================= -->
+    <div id="logout-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+        <div class="absolute inset-0 bg-black/70" onclick="closeLogoutModal()"></div>
+        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[360px] max-w-[95vw] shadow-2xl p-6 z-10 text-center">
+            <div class="w-14 h-14 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">
+                <i class="fa-solid fa-right-from-bracket text-red-400 text-xl"></i>
+            </div>
+            <h3 class="text-white font-bold text-lg mb-2">确认退出</h3>
+            <p class="text-gray-400 text-sm mb-6">退出后将清除当前会话数据，需要重新接入 Steam 游戏库。</p>
+            <div class="flex gap-3">
+                <button onclick="confirmLogout()" class="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-2.5 rounded-lg transition shadow-lg">
+                    确认退出
+                </button>
+                <button onclick="closeLogoutModal()" class="flex-1 bg-steam-dark border border-steam-light text-gray-300 py-2.5 rounded-lg hover:bg-steam-light transition">
+                    取消
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!--  登录 / 注册弹窗                                                      -->
+    <!-- ================================================================= -->
+    <div id="auth-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+        <div class="absolute inset-0 bg-black/70"></div>
+        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[400px] max-w-[95vw] shadow-2xl p-6 z-10">
+            <div class="flex items-center justify-between mb-5">
+                <h2 class="text-lg font-bold text-white flex items-center gap-2" id="auth-modal-title">
+                    <i class="fa-solid fa-right-to-bracket text-steam-accent"></i> 登录
+                </h2>
+                <button onclick="closeAuthModal()" class="text-gray-400 hover:text-white transition">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+
+            <div id="auth-error" class="hidden bg-red-500/10 border border-red-500/30 text-red-400 text-sm px-4 py-2.5 rounded-lg mb-4"></div>
+
+            <div class="mb-4">
+                <label class="text-sm text-gray-300 font-medium mb-1.5 block">用户名</label>
+                <input id="auth-username" type="text" placeholder="输入用户名"
+                       class="w-full bg-steam-dark border border-steam-light/80 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm outline-none focus:border-steam-accent transition">
+            </div>
+            <div class="mb-5">
+                <label class="text-sm text-gray-300 font-medium mb-1.5 block">密码</label>
+                <input id="auth-password" type="password" placeholder="输入密码（至少4位）"
+                       class="w-full bg-steam-dark border border-steam-light/80 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm outline-none focus:border-steam-accent transition">
+            </div>
+
+            <button id="auth-submit-btn" class="w-full bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2 shadow-lg mb-3">
+                <i class="fa-solid fa-right-to-bracket"></i> 登录
+            </button>
+            <p class="text-center text-xs text-gray-500">
+                <span id="auth-toggle-text">还没有账号？</span>
+                <button id="auth-toggle-btn" class="text-steam-accent hover:underline">立即注册</button>
+            </p>
+        </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!--  Steam ID 输入弹窗                                                   -->
+    <!-- ================================================================= -->
+    <div id="steam-id-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+        <div class="absolute inset-0 bg-black/70" onclick="closeSteamIdModal()"></div>
+        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[420px] max-w-[95vw] shadow-2xl p-6 z-10">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-bold text-white flex items-center gap-2">
+                    <i class="fa-brands fa-steam text-steam-accent"></i> 接入 Steam 账号
+                </h2>
+                <button onclick="closeSteamIdModal()" class="text-gray-400 hover:text-white transition">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            <p class="text-sm text-gray-400 mb-4 leading-relaxed">
+                输入你的 <strong class="text-steam-accent">Steam 64位 ID</strong> 或 <strong class="text-steam-accent">个人资料自定义名称</strong>，即可同步真实游戏库。
+            </p>
+            <div class="text-xs text-gray-500 mb-4 bg-steam-dark/50 p-3 rounded-lg">
+                <p class="mb-1">📌 如何找到我的 Steam ID？</p>
+                <p>Steam 客户端 → 右上角头像 → <strong>账户详情</strong> → 页面顶部可见 <strong>Steam ID 64</strong></p>
+            </div>
+            <input id="steam-id-input" type="text" placeholder="例：76561198000000000 或 myprofilename"
+                   class="w-full bg-steam-dark border border-steam-light/80 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm outline-none focus:border-steam-accent transition mb-4">
+            <div class="flex gap-3">
+                <button id="steam-id-submit" class="flex-1 bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2 shadow-lg">
+                    <i class="fa-solid fa-rotate"></i> 同步真实数据
+                </button>
+                <button id="steam-id-skip" class="flex-1 bg-steam-dark border border-steam-light text-gray-300 py-2.5 rounded-lg hover:bg-steam-light transition">
+                    跳过，使用模拟数据
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!--  Toast 通知                                                         -->
+    <!-- ================================================================= -->
+    <div id="toast-container" class="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none">
     </div>
 
     <script src="/static/app.js"></script>

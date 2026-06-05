@@ -24,6 +24,39 @@ class Game(Base):
     header_image: str = Column(String(512), default="")     # Steam 封面图 URL
     store_url: str = Column(String(512), default="")        # Steam 商店页面 URL
 
+
+class User(Base):
+    """Registered user account for authentication."""
+
+    __tablename__ = "users"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    username: str = Column(String(64), unique=True, index=True, nullable=False)
+    password_hash: str = Column(String(256), nullable=False)
+    token: str = Column(String(128), unique=True, index=True, default="")   # auth token
+    avatar_seed: str = Column(String(64), default="")                       # DiceBear seed
+    created_at: str = Column(String(32), default="")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "avatar_seed": self.avatar_seed,
+            "created_at": self.created_at,
+        }
+
+
+class Conversation(Base):
+    """Persistent chat history per session."""
+
+    __tablename__ = "conversations"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    session_id: str = Column(String(64), index=True, nullable=False)
+    role: str = Column(String(16), nullable=False)         # "user" or "assistant"
+    content: str = Column(String(8192), nullable=False)
+    created_at: str = Column(String(32), default="")
+
     def __repr__(self) -> str:
         return f"<Game(id={self.id}, name='{self.name}', price={self.price_cny})>"
 

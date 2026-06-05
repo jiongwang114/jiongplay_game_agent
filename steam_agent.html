@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Steam 游戏品鉴师 - 智能 Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        steam: { 
+                            dark: '#171a21', 
+                            panel: '#1b2838', 
+                            light: '#2a475e', 
+                            accent: '#66c0f4',
+                            hover: '#1f8bca'
+                        }
+                    },
+                    animation: {
+                        'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #2a475e; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #66c0f4; }
+        
+        /* 打字机光标动画 */
+        .typing-dot {
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body class="bg-[#121419] text-gray-300 h-screen flex overflow-hidden">
+
+    <!-- 左侧边栏：用户控制台 & AI 状态 -->
+    <aside class="w-72 bg-steam-panel border-r border-steam-light flex flex-col justify-between hidden md:flex shrink-0 shadow-xl z-10">
+        <div class="p-6 overflow-y-auto">
+            <h1 class="text-xl font-bold text-white flex items-center gap-3 mb-8 tracking-wide">
+                <i class="fa-solid fa-gamepad text-steam-accent text-2xl drop-shadow-[0_0_8px_rgba(102,192,244,0.5)]"></i> 
+                游戏品鉴师
+            </h1>
+            
+            <!-- 用户模块 -->
+            <div class="bg-steam-dark p-4 rounded-xl border border-steam-light/50 shadow-inner mb-6 relative overflow-hidden group">
+                <div class="absolute inset-0 bg-gradient-to-br from-steam-accent/10 to-transparent opacity-0 group-hover:opacity-100 transition duration-500"></div>
+                <div class="flex items-center gap-4 mb-5 relative z-10">
+                    <div class="w-12 h-12 bg-steam-light rounded-full overflow-hidden border-2 border-steam-accent shadow-[0_0_10px_rgba(102,192,244,0.3)]">
+                        <img src="https://api.dicebear.com/7.x/adventurer/svg?seed=Alex&backgroundColor=2a475e" alt="avatar" class="w-full h-full object-cover">
+                    </div>
+                    <div>
+                        <p class="text-[15px] text-white font-bold tracking-wide">Player_One</p>
+                        <div class="flex items-center gap-1.5 mt-0.5">
+                            <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                            <p class="text-xs text-green-400">在线并已准备好</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <button id="sync-btn" onclick="syncSteamData()" class="w-full bg-steam-light hover:bg-steam-hover text-sm text-white py-2.5 rounded-lg transition-all duration-300 flex items-center justify-center gap-2 shadow-lg relative z-10 font-medium">
+                    <i class="fa-brands fa-steam text-lg" id="sync-icon"></i> 
+                    <span id="sync-text">接入 Steam 游戏库</span>
+                </button>
+            </div>
+
+            <!-- AI 状态面板 -->
+            <div class="mt-8">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-microchip"></i> Agent 实时状态
+                </h3>
+                <div class="bg-steam-dark/80 p-4 rounded-xl text-sm space-y-3.5 border border-steam-light/30 shadow-inner">
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">数据源</span>
+                        <span id="data-status" class="text-gray-500 text-xs px-2 py-0.5 bg-gray-800 rounded">未接入</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">偏好倾向</span>
+                        <span id="pref-status" class="text-steam-accent font-medium">-</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">推荐置信度</span>
+                        <span class="text-green-400 font-medium">85%</span>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-gray-700/50 relative">
+                        <i class="fa-solid fa-quote-left text-gray-600 absolute -top-2 left-0 text-xs"></i>
+                        <p id="agent-thought" class="text-xs text-gray-400 italic pl-4 leading-relaxed tracking-wide">"等待了解你的游戏喜好..."</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-6 border-t border-steam-light/50 bg-steam-dark/30">
+            <button class="w-full text-left text-sm text-gray-400 hover:text-white transition flex items-center gap-3 mb-4">
+                <i class="fa-solid fa-gear w-4"></i> 偏好设置
+            </button>
+            <button class="w-full text-left text-sm text-red-400 hover:text-red-300 transition flex items-center gap-3">
+                <i class="fa-solid fa-right-from-bracket w-4"></i> 退出登录
+            </button>
+        </div>
+    </aside>
+
+    <!-- 右侧：核心对话区 -->
+    <main class="flex-1 flex flex-col relative w-full bg-[#121419] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]">
+        
+        <!-- 移动端顶部导航 (桌面端隐藏) -->
+        <header class="md:hidden bg-steam-panel p-4 flex items-center justify-between border-b border-steam-light z-20">
+            <h1 class="text-lg font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-gamepad text-steam-accent"></i> 游戏品鉴师
+            </h1>
+            <button class="text-steam-accent"><i class="fa-solid fa-bars text-xl"></i></button>
+        </header>
+
+        <!-- 对话记录区 -->
+        <div class="flex-1 overflow-y-auto p-4 md:p-8 space-y-8 scroll-smooth" id="chat-container">
+            
+            <!-- AI 欢迎语 -->
+            <div class="flex gap-4 animate-[fadeIn_0.5s_ease-out]">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0 shadow-[0_0_15px_rgba(102,192,244,0.4)]">
+                    <i class="fa-solid fa-robot text-white text-sm"></i>
+                </div>
+                <div class="max-w-[85%] md:max-w-[70%]">
+                    <p class="text-xs text-gray-400 mb-1.5 ml-1 font-medium">Steam 智能品鉴师</p>
+                    <div class="bg-steam-panel p-4 md:p-5 rounded-2xl rounded-tl-none border border-steam-light shadow-lg text-[15px] text-gray-200 leading-relaxed">
+                        <p>嗨！我是你的专属 Steam 游戏推荐 Agent 🎮</p>
+                        <p class="mt-2 text-gray-400">你可以直接告诉我你想玩什么，或者<strong class="text-steam-accent">接入你的 Steam 账号</strong>，让我分析你的游戏库，为你提供更精准的个性化推荐！</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 动态消息将附加在这里 -->
+        </div>
+
+        <!-- 底部交互输入区 -->
+        <div class="p-4 md:p-6 bg-gradient-to-t from-[#0d0f12] via-[#121419] to-transparent pt-12 relative z-10">
+            
+            <!-- 快捷引导标签 -->
+            <div class="flex gap-2.5 mb-4 overflow-x-auto pb-2 scrollbar-hide" id="quick-prompts">
+                <button onclick="sendQuickMessage('基于我最近常玩的游戏，推荐几款类似的新作')" class="whitespace-nowrap bg-steam-panel border border-steam-light/60 text-xs text-gray-300 px-4 py-2 rounded-full hover:border-steam-accent hover:text-steam-accent hover:bg-steam-dark transition-all shadow-sm">
+                    🔍 基于我的游戏库推荐
+                </button>
+                <button onclick="sendQuickMessage('推荐几款 100 元以内的高画质 RPG 游戏')" class="whitespace-nowrap bg-steam-panel border border-steam-light/60 text-xs text-gray-300 px-4 py-2 rounded-full hover:border-steam-accent hover:text-steam-accent hover:bg-steam-dark transition-all shadow-sm">
+                    💰 100元以内的 RPG
+                </button>
+                <button onclick="sendQuickMessage('随便给我推荐一个让人惊艳的独立游戏，像星露谷那样的')" class="whitespace-nowrap bg-steam-panel border border-steam-light/60 text-xs text-gray-300 px-4 py-2 rounded-full hover:border-steam-accent hover:text-steam-accent hover:bg-steam-dark transition-all shadow-sm">
+                    🎲 随机惊喜独立游戏
+                </button>
+            </div>
+
+            <!-- 输入框主体 -->
+            <div class="relative bg-steam-panel border border-steam-light/80 rounded-xl flex items-center shadow-2xl focus-within:border-steam-accent focus-within:ring-1 focus-within:ring-steam-accent transition-all duration-300">
+                <button class="p-4 text-gray-400 hover:text-steam-accent transition-colors flex-shrink-0">
+                    <i class="fa-solid fa-paperclip text-lg"></i>
+                </button>
+                <input type="text" id="chat-input" placeholder="输入你的需求，比如：想找个能和朋友一起玩的合作游戏..." class="flex-1 bg-transparent text-white placeholder-gray-500 py-4 px-2 outline-none text-[15px]">
+                <button onclick="handleSend()" id="send-btn" class="bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold px-5 md:px-7 py-2.5 rounded-lg mr-2 transition-colors flex items-center gap-2 shadow-[0_0_10px_rgba(102,192,244,0.3)] hover:shadow-[0_0_15px_rgba(102,192,244,0.5)]">
+                    <span class="hidden md:inline">发送</span> 
+                    <i class="fa-solid fa-paper-plane"></i>
+                </button>
+            </div>
+            <p class="text-center text-[11px] text-gray-600 mt-3 font-medium">AI 推荐数据仅供参考，具体价格和折扣信息请以 Steam 商店实时页面为准。</p>
+        </div>
+    </main>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const chatInput = document.getElementById('chat-input');
+        let isSyncing = false;
+        let isSteamConnected = false;
+
+        // 监听回车键发送
+        chatInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                handleSend();
+            }
+        });
+
+        // 处理发送动作
+        function handleSend() {
+            const text = chatInput.value.trim();
+            if (!text) return;
+
+            // 添加用户消息
+            appendUserMessage(text);
+            chatInput.value = '';
+
+            // 显示 AI 思考中状态
+            const typingId = showTypingIndicator();
+
+            // 模拟网络延迟和 AI 处理 (1.5秒后回复)
+            setTimeout(() => {
+                removeElement(typingId);
+                
+                // 简单的关键词判断来演示不同的回复
+                if (text.includes('100') || text.toLowerCase().includes('rpg')) {
+                    appendAIGameCardsMessage();
+                } else {
+                    appendAITextMessage("我已经收到你的需求啦！根据我的数据库分析，这几款游戏可能会符合你的口味。不过如果你能告诉我更具体的偏好（比如：喜欢回合制还是动作类？），我能推荐得更准哦！");
+                }
+                
+                scrollToBottom();
+            }, 1500);
+        }
+
+        // 快捷键发送
+        function sendQuickMessage(text) {
+            chatInput.value = text;
+            handleSend();
+        }
+
+        // 添加用户消息 UI
+        function appendUserMessage(text) {
+            const msgHTML = `
+            <div class="flex gap-4 flex-row-reverse animate-[fadeIn_0.3s_ease-out]">
+                <div class="w-10 h-10 rounded-full bg-steam-light flex items-center justify-center flex-shrink-0 border border-steam-accent/50 overflow-hidden">
+                    <img src="https://api.dicebear.com/7.x/adventurer/svg?seed=Alex&backgroundColor=2a475e" alt="avatar" class="w-full h-full object-cover">
+                </div>
+                <div class="max-w-[85%] md:max-w-[70%]">
+                    <p class="text-xs text-gray-400 mb-1.5 mr-1 font-medium text-right">你</p>
+                    <div class="bg-steam-light/80 p-4 rounded-2xl rounded-tr-none text-white text-[15px] shadow-md backdrop-blur-sm border border-steam-accent/20">
+                        ${text}
+                    </div>
+                </div>
+            </div>`;
+            chatContainer.insertAdjacentHTML('beforeend', msgHTML);
+            scrollToBottom();
+        }
+
+        // 添加 AI 纯文本消息 UI
+        function appendAITextMessage(text) {
+            const msgHTML = `
+            <div class="flex gap-4 animate-[fadeIn_0.3s_ease-out]">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0 shadow-[0_0_10px_rgba(102,192,244,0.3)]">
+                    <i class="fa-solid fa-robot text-white text-sm"></i>
+                </div>
+                <div class="max-w-[85%] md:max-w-[70%]">
+                    <p class="text-xs text-gray-400 mb-1.5 ml-1 font-medium">Steam 智能品鉴师</p>
+                    <div class="bg-steam-panel p-4 rounded-2xl rounded-tl-none border border-steam-light shadow-lg text-[15px] text-gray-200">
+                        ${text}
+                    </div>
+                </div>
+            </div>`;
+            chatContainer.insertAdjacentHTML('beforeend', msgHTML);
+        }
+
+        // 添加 AI 富文本卡片消息 UI (核心功能)
+        function appendAIGameCardsMessage() {
+            const msgHTML = `
+            <div class="flex gap-4 animate-[fadeIn_0.4s_ease-out]">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0 shadow-[0_0_15px_rgba(102,192,244,0.4)]">
+                    <i class="fa-solid fa-robot text-white text-sm"></i>
+                </div>
+                <div class="max-w-[95%] w-full">
+                    <p class="text-xs text-gray-400 mb-1.5 ml-1 font-medium">Steam 智能品鉴师</p>
+                    <div class="bg-steam-panel p-5 rounded-2xl rounded-tl-none border border-steam-light shadow-xl">
+                        <p class="text-[15px] mb-5 text-gray-200">没问题！根据你的预算（<strong class="text-steam-accent">￥100以内</strong>）和对<strong class="text-steam-accent">画质/RPG</strong>的要求，我为你筛选了以下几款目前性价比极高的佳作：</p>
+                        
+                        <!-- 推荐游戏卡片网格 -->
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                            
+                            <!-- 游戏卡片 1 -->
+                            <div class="bg-steam-dark rounded-xl border border-steam-light/60 hover:border-steam-accent/80 transition-all duration-300 flex flex-col overflow-hidden group shadow-lg hover:shadow-[0_0_20px_rgba(102,192,244,0.15)] cursor-pointer">
+                                <div class="h-36 bg-gray-800 relative overflow-hidden">
+                                    <img src="https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&q=80&w=600&h=300" class="object-cover w-full h-full opacity-80 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500" alt="Cyberpunk">
+                                    <div class="absolute top-2 right-2 bg-green-500/90 backdrop-blur-sm text-white text-xs font-bold px-2.5 py-1 rounded shadow">特别好评 (92%)</div>
+                                    <div class="absolute bottom-0 left-0 w-full h-1/2 bg-gradient-to-t from-steam-dark to-transparent"></div>
+                                </div>
+                                <div class="p-4 flex-1 flex flex-col justify-between relative z-10 -mt-4">
+                                    <div>
+                                        <h4 class="text-white font-bold text-lg mb-2 drop-shadow-md">赛博朋克 2077</h4>
+                                        <div class="flex flex-wrap gap-1.5 mb-3">
+                                            <span class="bg-[#2a475e]/80 border border-[#66c0f4]/30 text-[#66c0f4] text-[11px] px-2 py-0.5 rounded-sm">开放世界</span>
+                                            <span class="bg-[#2a475e]/80 border border-[#66c0f4]/30 text-[#66c0f4] text-[11px] px-2 py-0.5 rounded-sm">RPG</span>
+                                            <span class="bg-[#2a475e]/80 border border-[#66c0f4]/30 text-[#66c0f4] text-[11px] px-2 py-0.5 rounded-sm">科幻</span>
+                                        </div>
+                                        <p class="text-xs text-gray-400 line-clamp-2 mb-3">沉浸式第一人称RPG，极致画质体验夜之城。目前正在进行史低特卖。</p>
+                                    </div>
+                                    <div class="flex justify-between items-end mt-2 pt-3 border-t border-gray-700/50">
+                                        <div class="flex items-center gap-2">
+                                            <span class="bg-green-600 text-white text-xs font-bold px-1.5 py-0.5 rounded-sm">-70%</span>
+                                            <div class="flex flex-col">
+                                                <span class="text-[10px] text-gray-500 line-through leading-none">￥298</span>
+                                                <span class="text-steam-accent font-bold text-lg leading-none">￥89</span>
+                                            </div>
+                                        </div>
+                                        <button class="bg-steam-light hover:bg-steam-hover text-white text-xs px-3 py-1.5 rounded transition shadow-md">
+                                            商店页面 <i class="fa-solid fa-arrow-up-right-from-square ml-1"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 游戏卡片 2 -->
+                            <div class="bg-steam-dark rounded-xl border border-steam-light/60 hover:border-steam-accent/80 transition-all duration-300 flex flex-col overflow-hidden group shadow-lg hover:shadow-[0_0_20px_rgba(102,192,244,0.15)] cursor-pointer">
+                                <div class="h-36 bg-gray-800 relative overflow-hidden">
+                                    <img src="https://images.unsplash.com/photo-1605901309584-818e25960b8f?auto=format&fit=crop&q=80&w=600&h=300" class="object-cover w-full h-full opacity-80 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500" alt="Witcher">
+                                    <div class="absolute top-2 right-2 bg-blue-500/90 backdrop-blur-sm text-white text-xs font-bold px-2.5 py-1 rounded shadow">好评如潮 (97%)</div>
+                                    <div class="absolute bottom-0 left-0 w-full h-1/2 bg-gradient-to-t from-steam-dark to-transparent"></div>
+                                </div>
+                                <div class="p-4 flex-1 flex flex-col justify-between relative z-10 -mt-4">
+                                    <div>
+                                        <h4 class="text-white font-bold text-lg mb-2 drop-shadow-md">巫师3：狂猎 - 次世代版</h4>
+                                        <div class="flex flex-wrap gap-1.5 mb-3">
+                                            <span class="bg-[#2a475e]/80 border border-[#66c0f4]/30 text-[#66c0f4] text-[11px] px-2 py-0.5 rounded-sm">剧情丰富</span>
+                                            <span class="bg-[#2a475e]/80 border border-[#66c0f4]/30 text-[#66c0f4] text-[11px] px-2 py-0.5 rounded-sm">动作 RPG</span>
+                                        </div>
+                                        <p class="text-xs text-gray-400 line-clamp-2 mb-3">次世代更新带来了光追和高清材质。绝对是 100 元以内能买到的最佳 RPG 之一。</p>
+                                    </div>
+                                    <div class="flex justify-between items-end mt-2 pt-3 border-t border-gray-700/50">
+                                        <div class="flex items-center gap-2">
+                                            <span class="bg-green-600 text-white text-xs font-bold px-1.5 py-0.5 rounded-sm">-75%</span>
+                                            <div class="flex flex-col">
+                                                <span class="text-[10px] text-gray-500 line-through leading-none">￥149</span>
+                                                <span class="text-steam-accent font-bold text-lg leading-none">￥37</span>
+                                            </div>
+                                        </div>
+                                        <button class="bg-steam-light hover:bg-steam-hover text-white text-xs px-3 py-1.5 rounded transition shadow-md">
+                                            商店页面 <i class="fa-solid fa-arrow-up-right-from-square ml-1"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+            chatContainer.insertAdjacentHTML('beforeend', msgHTML);
+        }
+
+        // 显示打字中动画
+        function showTypingIndicator() {
+            const id = 'typing-' + Date.now();
+            const msgHTML = `
+            <div id="${id}" class="flex gap-4 animate-[fadeIn_0.3s_ease-out]">
+                <div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0">
+                    <i class="fa-solid fa-robot text-white text-sm"></i>
+                </div>
+                <div class="bg-steam-panel px-5 py-4 rounded-2xl rounded-tl-none border border-steam-light flex items-center gap-1.5">
+                    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>
+                    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>
+                </div>
+            </div>`;
+            chatContainer.insertAdjacentHTML('beforeend', msgHTML);
+            scrollToBottom();
+            return id;
+        }
+
+        function removeElement(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // 模拟同步 Steam 库数据
+        function syncSteamData() {
+            if (isSyncing || isSteamConnected) return;
+            isSyncing = true;
+            
+            const btn = document.getElementById('sync-btn');
+            const icon = document.getElementById('sync-icon');
+            const text = document.getElementById('sync-text');
+            
+            // 变更为加载状态
+            btn.classList.replace('bg-steam-light', 'bg-gray-600');
+            icon.classList.replace('fa-steam', 'fa-spinner');
+            icon.classList.add('fa-spin');
+            text.innerText = '正在读取 Steam API...';
+
+            setTimeout(() => {
+                // 恢复为成功状态
+                btn.classList.replace('bg-gray-600', 'bg-green-600');
+                btn.classList.replace('hover:bg-steam-hover', 'hover:bg-green-500');
+                icon.classList.remove('fa-spin');
+                icon.classList.replace('fa-spinner', 'fa-check');
+                text.innerText = '数据同步完成 (库中 142 款游戏)';
+                isSyncing = false;
+                isSteamConnected = true;
+
+                // 更新 Agent 分析状态
+                document.getElementById('data-status').innerText = '已接入 Steam 库';
+                document.getElementById('data-status').classList.replace('bg-gray-800', 'bg-green-600/20');
+                document.getElementById('data-status').classList.add('text-green-400');
+                
+                document.getElementById('pref-status').innerText = 'FPS / 开放世界RPG';
+                document.getElementById('agent-thought').innerHTML = '“发现你最近沉迷了 60 小时的《赛博朋克2077》，看来你是个开放世界狂热粉。”';
+                
+                // AI 主动搭话
+                setTimeout(() => {
+                    const typingId = showTypingIndicator();
+                    setTimeout(() => {
+                        removeElement(typingId);
+                        appendAITextMessage("我已经成功分析了你的 Steam 游戏库。发现你最近在 <strong>《Apex 英雄》</strong> 和 <strong>《星空》</strong> 上花了不少时间。今天想找点类似的高强度对战游戏，还是沉浸式的单机大作？");
+                        scrollToBottom();
+                    }, 1200);
+                }, 500);
+
+            }, 2000);
+        }
+
+        // 初始化动画
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
+</body>
+</html>

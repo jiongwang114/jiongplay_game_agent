@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 load_dotenv(PROJECT_ROOT / ".env")
 
 from core.agent import AgentRunner
+from core.trace import TraceStore
 from data_layer.auth import AuthManager
 
 # ---------------------------------------------------------------------------
@@ -292,7 +293,13 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
     result = {"steam_id": steam_id, "success": False, "persona_name": "",
               "avatar_url": "", "game_count": 0, "total_playtime_min": 0,
               "games": [], "recent_games": [], "top_genres": [],
-              "recent_playtime_analysis": "", "message": ""}
+              "recent_playtime_analysis": "", "message": "",
+              # [新增] 第一期：暴露已获取但未利用的 Steam 字段
+              "timecreated": 0,           # 账户创建时间（Unix 时间戳）
+              "loccountrycode": "",       # 所在国家/地区代码
+              "account_age_days": 0,      # 账户年龄（天）
+              "top_games_by_playtime": [], # 按游玩时长排名的 Top 10 游戏 [{name, playtime_hours}]
+              }
 
     if not STEAM_API_KEY:
         result["message"] = "Steam API Key 未配置，请在 .env 中设置 STEAM_API_KEY"
@@ -317,7 +324,14 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
             player = players[0]
             result["persona_name"] = player.get("personaname", "Unknown")
             result["avatar_url"] = player.get("avatarfull", "")
-            _logger.info(f"玩家昵称: {result['persona_name']}")
+            # [新增] 提取账户创建时间并计算年龄
+            timecreated = player.get("timecreated", 0)
+            if timecreated:
+                import datetime as _dt
+                result["timecreated"] = timecreated
+                result["account_age_days"] = (_dt.datetime.now().timestamp() - timecreated) // 86400
+            result["loccountrycode"] = player.get("loccountrycode", "")
+            _logger.info(f"玩家昵称: {result['persona_name']}, 国家: {result['loccountrycode']}, 账户年龄: {result['account_age_days']}天")
 
             # 2. Owned games
             _logger.info(f"正在获取游戏库: steam_id={steam_id}")
@@ -331,7 +345,12 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
             owned = games_data.get("games", [])
             result["game_count"] = games_data.get("game_count", len(owned))
             result["games"] = sorted(owned, key=lambda g: g.get("playtime_forever", 0), reverse=True)[:50]
-            _logger.info(f"游戏库获取成功: {result['game_count']} 款游戏")
+            # [新增] 构建 Top 10 游玩时长排名（小时取整）
+            result["top_games_by_playtime"] = [
+                {"name": g.get("name", "未知"), "playtime_hours": round(g.get("playtime_forever", 0) / 60, 1)}
+                for g in result["games"][:10]
+            ]
+            _logger.info(f"游戏库获取成功: {result['game_count']} 款游戏, Top1: {result['top_games_by_playtime'][0]['name'] if result['top_games_by_playtime'] else 'N/A'}")
 
             # 3. Recently played (last 2 weeks)
             _logger.info(f"正在获取最近游玩记录: steam_id={steam_id}")
@@ -367,6 +386,17 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
 
             # Build analysis text
             parts = []
+            # [新增] 账户年龄信息
+            if result["account_age_days"] and result["account_age_days"] > 0:
+                years = result["account_age_days"] // 365
+                parts.append(f"Steam 账号已注册约 {years} 年" if years > 0 else f"Steam 账号注册不到 1 年")
+            if result["loccountrycode"]:
+                parts.append(f"地区：{result['loccountrycode']}")
+            # [新增] 最常玩游戏 Top 3
+            top3 = result["top_games_by_playtime"][:3]
+            if top3:
+                top3_str = "、".join(f"{g['name']}({g['playtime_hours']}h)" for g in top3)
+                parts.append(f"最常玩：{top3_str}")
             if recent:
                 recent_names = [g.get("name", "") for g in recent[:3] if g.get("name")]
                 if recent_names:
@@ -414,12 +444,7 @@ async def sync_steam(req: SyncSteamRequest):
     if req.steam_id.strip():
         _logger.info(f"收到真实 Steam 同步请求: steam_id={req.steam_id.strip()}, session={req.session_id}")
 
-        # If user is logged in, link the session so Steam data persists to DB
-        if req.token:
-            user = _auth.get_user_by_token(req.token)
-            if user:
-                _agent.link_user(req.session_id, user.id)
-
+        # Resolve vanity URL → 64-bit ID first, so we can check uniqueness
         resolved = await _resolve_steam_id(req.steam_id.strip())
         if not resolved:
             _logger.warning(f"Steam ID 解析失败: {req.steam_id.strip()}")
@@ -431,6 +456,24 @@ async def sync_steam(req: SyncSteamRequest):
                 "recent_playtime_analysis": "",
                 "message": f"无法解析 Steam ID「{req.steam_id}」，请确认输入正确（64位数字ID或个人资料URL中的自定义名称）",
             }
+
+        # If user is logged in, link the session so Steam data persists to DB
+        if req.token:
+            user = _auth.get_user_by_token(req.token)
+            if user:
+                _agent.link_user(req.session_id, user.id)
+                # [修改] 原因：确保一个 Steam ID 只能绑定一个用户，防止多用户共用同一 Steam 账号
+                existing_owner = _agent.db.get_user_by_steam_id(resolved)
+                if existing_owner and existing_owner.id != user.id:
+                    _logger.warning(f"Steam ID {resolved} 已被用户 {existing_owner.username} 绑定")
+                    return {
+                        "success": False,
+                        "is_simulated": False,
+                        "game_count": 0,
+                        "top_genres": [],
+                        "recent_playtime_analysis": "",
+                        "message": f"该 Steam ID 已被用户「{existing_owner.username}」绑定，一个 Steam ID 只能绑定一个账号",
+                    }
 
         profile = await _fetch_steam_profile(resolved)
         if profile["success"]:
@@ -661,6 +704,45 @@ async def tool_results(session_id: str):
     """
     games = _agent.get_tool_results(session_id)
     return {"games": games}
+
+
+# ---------------------------------------------------------------------------
+#  Agent Trace API — 执行流程可视化
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/trace/{session_id}")
+async def trace_latest(session_id: str):
+    """
+    Return the most recent execution trace for *session_id*.
+
+    The trace contains a tree of spans (intent detection, tool calls,
+    LLM generation, etc.) with timing and input/output summaries.
+    Called by the frontend when the agent status returns to "idle"
+    to render the execution flow panel.
+    """
+    traces = TraceStore.get_by_session(session_id, limit=1)
+    if not traces:
+        return {"trace": None, "message": "暂无执行记录"}
+    return {"trace": traces[0].to_dict()}
+
+
+@app.get("/api/trace/history")
+async def trace_history(session_id: str = "", limit: int = 20):
+    """
+    Return a list of recent trace summaries.
+
+    If *session_id* is provided, returns only that session's traces.
+    Otherwise returns the global recent list.
+    """
+    if session_id:
+        traces = TraceStore.get_by_session(session_id, limit=min(limit, 50))
+    else:
+        traces = TraceStore.get_recent(limit=min(limit, 50))
+    return {
+        "traces": [t.to_summary() for t in traces],
+        "count": len(traces),
+    }
 
 
 # ---------------------------------------------------------------------------

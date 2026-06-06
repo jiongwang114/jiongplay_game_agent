@@ -16,6 +16,7 @@ class GameFilterTool:
     def __init__(self, db: GameDB):
         self._db = db
 
+    # [职责] 输入结构化筛选参数 → 调用 GameDB.filter_games → 返回 dict 列表
     def run(self, params: dict) -> list[dict]:
         """
         Execute a filter query.
@@ -24,6 +25,7 @@ class GameFilterTool:
             max_price      — float, upper price bound (CNY)
             min_review     — float, minimum review score (0.0–1.0)
             tags           — list[str], tags that must ALL be present
+            exclude_tags   — list[str], tags that must NOT be present (排除条件)
             is_multiplayer — bool
             limit          — int (default 10)
         """
@@ -31,6 +33,7 @@ class GameFilterTool:
             max_price=params.get("max_price"),
             min_review=params.get("min_review"),
             tags=params.get("tags"),
+            exclude_tags=params.get("exclude_tags"),
             is_multiplayer=params.get("is_multiplayer"),
             limit=params.get("limit", 10),
         )

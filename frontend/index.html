@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -119,6 +119,20 @@
                 </div>
             </div>
 
+            <!-- [新增] Agent 执行流程面板 — 可视化 Trace -->
+            <div class="mt-6" id="desktop-trace-section">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-3 flex items-center gap-2 cursor-pointer"
+                    onclick="toggleTracePanel()">
+                    <i class="fa-solid fa-diagram-project"></i> 执行流程
+                    <i id="trace-toggle-icon" class="fa-solid fa-chevron-down text-[10px] ml-auto transition-transform duration-300"></i>
+                </h3>
+                <div id="desktop-trace-panel" class="bg-steam-dark/80 p-4 rounded-xl text-xs border border-steam-light/30 shadow-inner max-h-80 overflow-y-auto space-y-2 hidden">
+                    <p id="desktop-trace-empty" class="text-gray-500 italic text-center py-4">发送一条消息后，这里将展示 Agent 执行流程</p>
+                    <div id="desktop-trace-content"></div>
+                    <div id="desktop-trace-summary" class="hidden pt-2 border-t border-gray-700/50 mt-2 text-gray-400 space-y-1"></div>
+                </div>
+            </div>
+
             <!-- 当前偏好设置 -->
             <div id="desktop-prefs-display" class="mt-6 hidden">
                 <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-3 flex items-center gap-2">
@@ -158,6 +172,16 @@
     <!--  右侧：核心对话区                                                    -->
     <!-- ================================================================= -->
     <main class="flex-1 flex flex-col relative w-full bg-[#121419]">
+
+        <!-- 日间/夜间主题切换 (右上角) -->
+        <div class="theme-toggle-wrapper">
+            <button id="theme-light-btn" class="theme-toggle-btn" title="日间模式" onclick="setTheme('light')">
+                <i class="fa-solid fa-sun"></i>
+            </button>
+            <button id="theme-dark-btn" class="theme-toggle-btn active" title="夜间模式" onclick="setTheme('dark')">
+                <i class="fa-solid fa-moon"></i>
+            </button>
+        </div>
 
         <!-- 移动端顶部导航 (桌面端隐藏) -->
         <header class="md:hidden bg-steam-panel p-4 flex items-center justify-between border-b border-steam-light z-20">
@@ -259,6 +283,20 @@
                         <i class="fa-solid fa-quote-left text-gray-600 absolute -top-2 left-0 text-xs"></i>
                         <p class="text-xs text-gray-400 italic pl-4 leading-relaxed tracking-wide" id="mobile-agent-thought">"等待了解你的游戏喜好..."</p>
                     </div>
+                </div>
+            </div>
+
+            <!-- [新增] Agent 执行流程面板 — 移动端 -->
+            <div class="mt-6">
+                <h3 class="text-xs text-gray-500 font-bold uppercase tracking-widest mb-3 flex items-center gap-2 cursor-pointer"
+                    onclick="toggleMobileTracePanel()">
+                    <i class="fa-solid fa-diagram-project"></i> 执行流程
+                    <i id="mobile-trace-toggle-icon" class="fa-solid fa-chevron-down text-[10px] ml-auto transition-transform duration-300"></i>
+                </h3>
+                <div id="mobile-trace-panel" class="bg-steam-dark/80 p-4 rounded-xl text-xs border border-steam-light/30 shadow-inner max-h-80 overflow-y-auto space-y-2 hidden">
+                    <p id="mobile-trace-empty" class="text-gray-500 italic text-center py-4">发送一条消息后，这里将展示 Agent 执行流程</p>
+                    <div id="mobile-trace-content"></div>
+                    <div id="mobile-trace-summary" class="hidden pt-2 border-t border-gray-700/50 mt-2 text-gray-400 space-y-1"></div>
                 </div>
             </div>
 
@@ -395,7 +433,7 @@
     <!--  登录 / 注册弹窗                                                      -->
     <!-- ================================================================= -->
     <div id="auth-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
-        <div class="absolute inset-0 bg-black/70"></div>
+        <div class="absolute inset-0 bg-black/70" onclick="closeAuthModal()"></div>
         <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[400px] max-w-[95vw] shadow-2xl p-6 z-10">
             <div class="flex items-center justify-between mb-5">
                 <h2 class="text-lg font-bold text-white flex items-center gap-2" id="auth-modal-title">
@@ -434,7 +472,7 @@
     <!-- ================================================================= -->
     <div id="steam-id-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
         <div class="absolute inset-0 bg-black/70" onclick="closeSteamIdModal()"></div>
-        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[420px] max-w-[95vw] shadow-2xl p-6 z-10">
+        <div class="relative bg-steam-panel border border-steam-light rounded-2xl w-[440px] max-w-[95vw] shadow-2xl p-6 z-10">
             <div class="flex items-center justify-between mb-4">
                 <h2 class="text-lg font-bold text-white flex items-center gap-2">
                     <i class="fa-brands fa-steam text-steam-accent"></i> 接入 Steam 账号
@@ -444,22 +482,26 @@
                 </button>
             </div>
             <p class="text-sm text-gray-400 mb-4 leading-relaxed">
-                输入你的 <strong class="text-steam-accent">Steam 64位 ID</strong> 或 <strong class="text-steam-accent">个人资料自定义名称</strong>，即可同步真实游戏库。
+                输入你的 <strong class="text-steam-accent">Steam 64位 ID</strong> 或 <strong class="text-steam-accent">个人资料自定义名称</strong>，即可同步<strong class="text-green-400">真实游戏库</strong>，获得个性化推荐。
             </p>
             <div class="text-xs text-gray-500 mb-4 bg-steam-dark/50 p-3 rounded-lg">
                 <p class="mb-1">📌 如何找到我的 Steam ID？</p>
-                <p>Steam 客户端 → 右上角头像 → <strong>账户详情</strong> → 页面顶部可见 <strong>Steam ID 64</strong></p>
+                <p>Steam 客户端 → 右上角头像 → <strong>账户详情</strong> → 页面顶部可见 <strong>Steam ID 64</strong>（17位数字）</p>
+                <p class="mt-2 text-yellow-400/80">⚠️ 请确保你的 Steam 个人资料<strong>隐私设置</strong>为「公开」，否则无法读取游戏库。</p>
             </div>
             <input id="steam-id-input" type="text" placeholder="例：76561198000000000 或 myprofilename"
                    class="w-full bg-steam-dark border border-steam-light/80 rounded-lg px-4 py-3 text-white placeholder-gray-500 text-sm outline-none focus:border-steam-accent transition mb-4">
+            <!-- Steam API status check result -->
+            <div id="steam-api-status" class="hidden text-xs mb-4 p-2 rounded-lg"></div>
             <div class="flex gap-3">
                 <button id="steam-id-submit" class="flex-1 bg-steam-accent hover:bg-[#4cb0eb] text-steam-dark font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2 shadow-lg">
                     <i class="fa-solid fa-rotate"></i> 同步真实数据
                 </button>
-                <button id="steam-id-skip" class="flex-1 bg-steam-dark border border-steam-light text-gray-300 py-2.5 rounded-lg hover:bg-steam-light transition">
-                    跳过，使用模拟数据
+                <button id="steam-id-skip" class="flex-1 bg-steam-dark/60 border border-gray-600 text-gray-400 text-sm py-2.5 rounded-lg hover:bg-steam-dark hover:text-gray-300 transition">
+                    跳过，使用演示数据
                 </button>
             </div>
+            <p class="text-xs text-gray-600 mt-3 text-center">「演示数据」不会连接 Steam，仅展示功能效果</p>
         </div>
     </div>
 

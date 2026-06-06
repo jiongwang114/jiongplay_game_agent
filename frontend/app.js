@@ -486,6 +486,154 @@ function applyStatusUpdate(data) {
     if (mc && data.confidence != null) {
         mc.textContent = data.confidence + "%";
     }
+
+    // [新增] 当 Agent 完成一轮回复（phase → idle），自动拉取执行流程 Trace
+    if (data.phase === "idle" && _agentWasBusy) {
+        _agentWasBusy = false;
+        fetchAndRenderTrace();
+    }
+    if (data.phase !== "idle") {
+        _agentWasBusy = true;
+    }
+}
+var _agentWasBusy = false;  // [新增] 追踪 Agent 是否正在处理请求
+var _lastTraceId = "";      // [新增] 避免重复渲染同一个 trace
+
+// [新增] 获取最新 Trace 并渲染到面板
+function fetchAndRenderTrace() {
+    fetch("/api/trace/" + SESSION_ID)
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (!data.trace) return;
+            if (data.trace.trace_id === _lastTraceId) return;  // 已经渲染过了
+            _lastTraceId = data.trace.trace_id;
+            renderTracePanelDOM(data.trace);
+
+            // 自动展开面板
+            var dp = document.getElementById("desktop-trace-panel");
+            var mp = document.getElementById("mobile-trace-panel");
+            if (dp) {
+                dp.classList.remove("hidden");
+                document.getElementById("desktop-trace-empty").classList.add("hidden");
+                var icon = document.getElementById("trace-toggle-icon");
+                if (icon) icon.classList.add("rotate-180");
+            }
+            if (mp) {
+                mp.classList.remove("hidden");
+                var mempty = document.getElementById("mobile-trace-empty");
+                if (mempty) mempty.classList.add("hidden");
+                var micon = document.getElementById("mobile-trace-toggle-icon");
+                if (micon) micon.classList.add("rotate-180");
+            }
+        })
+        .catch(function () { /* trace API unavailable — ignore */ });
+}
+
+// [新增] 渲染 Trace 树到 DOM
+function renderTracePanelDOM(trace) {
+    var spanHTML = "";
+    if (trace.spans && trace.spans.length > 0) {
+        trace.spans.forEach(function (s) {
+            spanHTML += renderSpan(s, 0);
+        });
+    }
+
+    var summaryHTML = "";
+    if (trace.total_duration_ms) {
+        summaryHTML = "<div>⏱ 总耗时: <strong>" + (trace.total_duration_ms / 1000).toFixed(1) + "s</strong></div>" +
+                      "<div>🧠 LLM 调用: <strong>" + (trace.total_llm_calls || 0) + " 次</strong></div>";
+    }
+
+    // Desktop
+    var dc = document.getElementById("desktop-trace-content");
+    var ds = document.getElementById("desktop-trace-summary");
+    if (dc) dc.innerHTML = spanHTML;
+    if (ds) {
+        ds.innerHTML = summaryHTML;
+        if (summaryHTML) ds.classList.remove("hidden");
+    }
+
+    // Mobile
+    var mc = document.getElementById("mobile-trace-content");
+    var ms = document.getElementById("mobile-trace-summary");
+    if (mc) mc.innerHTML = spanHTML;
+    if (ms) {
+        ms.innerHTML = summaryHTML;
+        if (summaryHTML) ms.classList.remove("hidden");
+    }
+}
+
+// [新增] 递归渲染单个 Span（含子 span 树状缩进）
+function renderSpan(span, depth) {
+    var indent = "";
+    for (var i = 0; i < depth; i++) { indent += "<span class='trace-indent'></span>"; }
+    var prefix = depth > 0 ? (indent + "└─ ") : "";
+
+    var statusIcon = span.status === "error" ? "❌" :
+                     span.status === "running" ? "⏳" : "✅";
+    var statusClass = span.status === "error" ? "text-red-400" :
+                      span.status === "running" ? "text-yellow-400" : "text-green-400";
+
+    var nameMap = {
+        "save_message": "💾 保存消息",
+        "profile_extraction": "📝 偏好提取",
+        "intent_detection": "🧠 意图检测",
+        "clarify_decision": "❓ 追问决策",
+        "tool_execution": "🔧 工具调用",
+        "prompt_assembly": "📋 Prompt 组装",
+        "llm_generation": "🤖 LLM 生成"
+    };
+    var displayName = nameMap[span.name] || span.name;
+
+    var durationStr = span.duration_ms != null ? (" <span class='text-gray-500'>" + span.duration_ms + "ms</span>") : "";
+
+    var html = "<div class='trace-span py-0.5'>" +
+               "<span class='" + statusClass + "'>" + statusIcon + "</span> " +
+               prefix + displayName + durationStr;
+
+    if (span.output_summary) {
+        html += " <span class='text-gray-500'>→ " + escapeHtml(span.output_summary) + "</span>";
+    }
+    if (span.error) {
+        html += " <span class='text-red-400 text-[10px]'>" + escapeHtml(span.error) + "</span>";
+    }
+    html += "</div>";
+
+    // 递归子 span
+    if (span.children && span.children.length > 0) {
+        span.children.forEach(function (child) {
+            html += renderSpan(child, depth + 1);
+        });
+    }
+    return html;
+}
+
+// [新增] 折叠/展开桌面端 Trace 面板
+function toggleTracePanel() {
+    var panel = document.getElementById("desktop-trace-panel");
+    var icon = document.getElementById("trace-toggle-icon");
+    if (!panel) return;
+    if (panel.classList.contains("hidden")) {
+        panel.classList.remove("hidden");
+        if (icon) icon.classList.add("rotate-180");
+    } else {
+        panel.classList.add("hidden");
+        if (icon) icon.classList.remove("rotate-180");
+    }
+}
+
+// [新增] 折叠/展开移动端 Trace 面板
+function toggleMobileTracePanel() {
+    var panel = document.getElementById("mobile-trace-panel");
+    var icon = document.getElementById("mobile-trace-toggle-icon");
+    if (!panel) return;
+    if (panel.classList.contains("hidden")) {
+        panel.classList.remove("hidden");
+        if (icon) icon.classList.add("rotate-180");
+    } else {
+        panel.classList.add("hidden");
+        if (icon) icon.classList.remove("rotate-180");
+    }
 }
 
 function startAgentStatusSubscription() {

@@ -89,6 +89,20 @@ class GameDB:
         except Exception:
             pass
 
+        # ------------------------------------------------------------------
+        #  Migration: unique constraint on steam_id (one Steam ID per user)
+        #  Partial index — only enforces uniqueness for non-empty steam_ids.
+        # ------------------------------------------------------------------
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_steam_id_unique "
+                    "ON users (steam_id) WHERE steam_id != ''"
+                ))
+                conn.commit()
+        except Exception:
+            pass  # May fail if duplicate steam_ids exist — app-level check is authoritative
+
     # ------------------------------------------------------------------
     #  CRUD
     # ------------------------------------------------------------------
@@ -119,11 +133,13 @@ class GameDB:
     #  Filtering
     # ------------------------------------------------------------------
 
+    # [职责] 输入多维度筛选条件 → 动态 SQL 查询 → 返回匹配的游戏列表
     def filter_games(
         self,
         max_price: Optional[float] = None,
         min_review: Optional[float] = None,
         tags: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
         is_multiplayer: Optional[bool] = None,
         limit: int = 10,
     ) -> list[Game]:
@@ -133,6 +149,7 @@ class GameDB:
         - *max_price*      — upper price bound (CNY)
         - *min_review*     — minimum review score (0.0–1.0)
         - *tags*           — list of tags that must ALL be present (AND logic)
+        - *exclude_tags*   — [新增] list of tags that must NOT be present (排除条件)
         - *is_multiplayer* — if True, only multiplayer; if False, only single-player
         - *limit*          — max results
         """
@@ -147,6 +164,10 @@ class GameDB:
         if tags:
             for tag in tags:
                 query = query.filter(Game.tags.like(f"%{tag}%"))
+        # [新增] 排除标签 — 用于处理"不要像素画风"等用户否定条件
+        if exclude_tags:
+            for tag in exclude_tags:
+                query = query.filter(~Game.tags.like(f"%{tag}%"))
 
         return query.order_by(Game.review_score.desc()).limit(limit).all()
 
@@ -176,6 +197,13 @@ class GameDB:
     def set_user_token(self, user: User, token: str):
         user.token = token
         self.session.commit()
+
+    # [职责] 输入 steam_id → 查询该 Steam ID 被哪个用户绑定 → 返回 User 或 None
+    def get_user_by_steam_id(self, steam_id: str) -> Optional[User]:
+        """Return the user who owns this Steam ID, or None if unclaimed."""
+        if not steam_id:
+            return None
+        return self.session.query(User).filter(User.steam_id == steam_id).first()
 
     # ------------------------------------------------------------------
     #  User profile persistence (Steam / preferences / settings)

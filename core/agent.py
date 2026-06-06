@@ -7,9 +7,11 @@ import re
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
+from core.intent_router import IntentRouter, format_user_settings
 from core.llm_engine import LLMEngine
 from core.memory.session_memory import SessionMemory
 from core.memory.user_profile import UserProfile
+from core.trace import TraceContext, TraceStore
 from tools.game_filter_tool import GameFilterTool
 from tools.semantic_search_tool import SemanticSearchTool
 from tools.steam_store_tool import SteamStoreTool
@@ -20,17 +22,6 @@ from data_layer.vector_store import VectorStore
 # ---------------------------------------------------------------------------
 #  Intent‑detection keywords (lightweight, no LLM call needed for routing)
 # ---------------------------------------------------------------------------
-
-_GENRE_KEYWORDS = [
-    "rpg", "fps", "策略", "模拟", "动作", "冒险", "休闲", "独立",
-    "恐怖", "解谜", "竞速", "体育", "音乐", "角色扮演", "射击",
-    "开放世界", "肉鸽", "rogue", "魂类", "类魂", "银河城",
-    "种田", "建造", "生存", "潜行", "战棋", "卡牌",
-]
-
-_PRICE_KEYWORDS = ["便宜", "贵", "免费", "块", "元", "¥", "￥", "预算", "打折", "折扣"]
-_SIMILAR_KEYWORDS = ["类似", "像", "类", "风格的", "一样的", "like", "相似"]
-
 
 def _load_system_prompt() -> str:
     """Load the game expert prompt from file."""
@@ -55,19 +46,33 @@ class AgentRunner:
         4. Streams the LLM response back
     """
 
-    def __init__(self):
-        # Shared infrastructure
-        self.llm = LLMEngine()
-        self.db = GameDB()
-        self.memory = SessionMemory(db=self.db)
-        self.profile = UserProfile(self.llm)
+    # [职责] 初始化 Agent 所有依赖 — 每个参数为 None 时自动创建真实实例（支持依赖注入测试）
+    def __init__(
+        self,
+        llm=None,
+        db=None,
+        memory=None,
+        profile=None,
+        vector_store=None,
+        filter_tool=None,
+        semantic_tool=None,
+        steam_tool=None,
+    ):
+        # Shared infrastructure — injectable for testing, defaults to real instances
+        self.llm = llm if llm is not None else LLMEngine()
+        self.db = db if db is not None else GameDB()
+        self.memory = memory if memory is not None else SessionMemory(db=self.db)
+        self.profile = profile if profile is not None else UserProfile(self.llm)
         self.profile._db = self.db  # Enable DB persistence for preferences
-        self.vector_store = VectorStore()
+        self.vector_store = vector_store if vector_store is not None else VectorStore()
 
         # Tools
-        self.filter_tool = GameFilterTool(self.db)
-        self.semantic_tool = SemanticSearchTool(self.vector_store, self.db)
-        self.steam_tool = SteamStoreTool(self.db)
+        self.filter_tool = filter_tool if filter_tool is not None else GameFilterTool(self.db)
+        self.semantic_tool = semantic_tool if semantic_tool is not None else SemanticSearchTool(self.vector_store, self.db)
+        self.steam_tool = steam_tool if steam_tool is not None else SteamStoreTool(self.db)
+
+        # [新增] Intent router — extracted for testability (Phase 3)
+        self.intent_router = IntentRouter(self.llm)
 
         # Cached system prompt template
         self._system_prompt_template = _load_system_prompt()
@@ -286,11 +291,17 @@ class AgentRunner:
             settings = {}
         self._init_status(session_id)
 
+        # [新增] 创建请求级 Trace，用于可视化调试 Agent 执行流程
+        trace = TraceContext(session_id, message)
+
         # Determine linked user_id for persistence
         user_id = self._session_users.get(session_id)
 
         # 1. Save user message to history
-        self.memory.add(session_id, "user", message, user_id=user_id)
+        with trace.span("save_message") as span:
+            self.memory.add(session_id, "user", message, user_id=user_id)
+            span.input = {"message": message[:120], "user_id": user_id}
+            span.output = {"saved": True}
 
         # Yield progress immediately so the SSE stream has data flowing
         # while we do pre‑processing.  The frontend uses __PROGRESS__ to
@@ -302,11 +313,41 @@ class AgentRunner:
                             agent_thought="正在分析你的需求...", confidence=60)
 
         # 2. Silently extract preferences (fire‑and‑forget, non‑blocking in spirit)
-        await self.profile.extract_and_update(session_id, message)
+        # [新增] trace: 记录偏好提取
+        with trace.span("profile_extraction") as prof_span:
+            await self.profile.extract_and_update(session_id, message)
+            user_summary = self.profile.get_summary(session_id)
+            prof_span.input = {"message": message[:120]}
+            prof_span.output = {"user_summary": user_summary or "(空)"}
 
-        # 3. Decide: clarify or run tools
-        if self._should_ask_clarification(message):
-            tool_results = ""
+        # Build user summary early — needed for intent detection
+        # (user_summary already computed inside the span above)
+
+        # 3. Detect intent (keyword fast‑path or LLM deep understanding)
+        #    [修改] 原因：硬编码关键词无法理解"打起来很爽"、排除条件等自然语言
+        # [新增] trace: 记录意图检测
+        with trace.span("intent_detection") as intent_span:
+            intent = await self.intent_router.detect(message, settings, user_summary)
+            intent_span.input = {"message": message[:120], "user_summary": user_summary or ""}
+            intent_span.output = {
+                "action": intent.get("action"),
+                "source": intent.get("source"),
+                "clarify_question": intent.get("clarify_question", "")[:80],
+                "search_query": intent.get("search_query", "")[:80],
+                "reasoning": intent.get("reasoning", "")[:120],
+            }
+
+        if intent["action"] == "clarify":
+            # [新增] trace: 记录追问决策
+            with trace.span("clarify_decision") as clarify_span:
+                # Pass LLM‑generated clarification question as hint to the prompt
+                clarify_q = intent.get("clarify_question", "")
+                if clarify_q:
+                    tool_results = f"（用户表达比较模糊。建议追问方向：{clarify_q}。请结合用户画像，用轻松的语气问出这个问题。）"
+                else:
+                    tool_results = "（用户表达比较模糊，请根据追问规则向用户提 1 个最关键的问题。）"
+                clarify_span.input = {"intent_source": intent.get("source")}
+                clarify_span.output = {"clarify_question": clarify_q or "(默认追问)"}
             yield "__PROGRESS__需要了解更多细节..."
             self._update_status(session_id, phase="clarifying",
                                 agent_thought="需要更多信息，准备追问...")
@@ -317,9 +358,21 @@ class AgentRunner:
             # Phase: searching
             self._update_status(session_id, phase="searching",
                                 agent_thought="正在检索游戏库和 Steam 实时数据...")
-            tool_context = await self._run_tool_chain(message, settings)
-            self._tool_result_cache[session_id] = tool_context
-            tool_results = self._format_tool_results(tool_context)
+            # [修改] 原因：将 LLM 意图检测结果传入工具链，替代硬编码关键词路由
+            # [新增] trace: 记录工具执行
+            with trace.span("tool_execution") as tool_span:
+                tool_context = await self._run_tool_chain(message, settings, intent)
+                self._tool_result_cache[session_id] = tool_context
+                tool_results = self._format_tool_results(tool_context)
+                tool_span.input = {
+                    "action": intent.get("action"),
+                    "search_query": intent.get("search_query", "")[:80],
+                    "filters": intent.get("filters", {}),
+                }
+                tool_span.output = {
+                    "result_count": len(tool_context),
+                    "game_names": [g.get("name", "") for g in tool_context[:5]],
+                }
 
             found_count = len(tool_context)
             yield f"__PROGRESS__已检索到 {found_count} 款匹配游戏，正在生成推荐..."
@@ -331,175 +384,150 @@ class AgentRunner:
             )
 
         # 4. Build user-settings text for the prompt
-        user_settings_text = self._format_user_settings(settings)
+        user_settings_text = format_user_settings(settings)
 
-        # 5. Build the system prompt
-        user_summary = self.profile.get_summary(session_id)
-        system_prompt = self._system_prompt_template.replace(
-            "{user_profile_summary}", user_summary or "暂无偏好数据"
-        ).replace(
-            "{user_settings}", user_settings_text or ""
-        ).replace(
-            "{tool_results}", tool_results or "（等待用户提供更多信息）"
-        )
+        # 5. Build the system prompt — merge Steam profile + LLM-extracted preferences
+        #    user_summary already computed above (before intent detection)
+        # [新增] trace: 记录 Prompt 组装
+        with trace.span("prompt_assembly") as prompt_span:
+            steam_summary = self._build_steam_summary(session_id)
+            # [修改] 原因：Steam 同步数据之前仅显示在侧边栏，未进入推荐提示词，导致 Agent 不知道用户偏好
+            if steam_summary and user_summary:
+                combined_summary = steam_summary + "\n\n" + user_summary
+            elif steam_summary:
+                combined_summary = steam_summary
+            else:
+                combined_summary = user_summary
+            system_prompt = self._system_prompt_template.replace(
+                "{user_profile_summary}", combined_summary or "暂无偏好数据"
+            ).replace(
+                "{user_settings}", user_settings_text or ""
+            ).replace(
+                "{tool_results}", tool_results or "（等待用户提供更多信息）"
+            )
+            prompt_span.input = {
+                "has_steam": bool(steam_summary),
+                "has_user_summary": bool(user_summary),
+                "has_tool_results": bool(tool_results and "无匹配结果" not in str(tool_results)),
+            }
+            prompt_span.output = {"prompt_chars": len(system_prompt)}
 
         # 5. Build context for the LLM
         history = self.memory.get(session_id)
         context = message
 
         # 6. Stream response
+        # [新增] trace: 记录 LLM 生成
         response_chunks: list[str] = []
-        async for token in self.llm.stream_chat(system_prompt, history, context):
-            response_chunks.append(token)
-            yield token
+        with trace.span("llm_generation") as llm_span:
+            llm_span.input = {
+                "model": self.llm.model,
+                "history_turns": len(history) // 2,
+                "context": context[:120],
+            }
+            async for token in self.llm.stream_chat(system_prompt, history, context):
+                response_chunks.append(token)
+                yield token
+            llm_span.output = {"response_chars": len("".join(response_chunks))}
+            llm_span.metadata["model"] = self.llm.model
 
         # 7. Save assistant response to history
         full_response = "".join(response_chunks)
         self.memory.add(session_id, "assistant", full_response, user_id=user_id)
+
+        # [新增] 完成 trace 并存入全局缓冲区
+        trace.finish()
+        TraceStore.add(trace.trace)
 
         # Phase: done
         self._update_status(session_id, phase="idle",
                             agent_thought="回复完成，等待你的下一个问题 👋")
 
     # ------------------------------------------------------------------
-    #  Intent detection
+    #  Tool chain (intent‑driven)
     # ------------------------------------------------------------------
 
-    def _should_ask_clarification(self, message: str) -> bool:
-        """
-        Return True if the user message is too vague — we should ask a
-        follow‑up question instead of running tools.
-
-        Heuristic:
-            - Very short messages (< 10 chars) with no genre / price keywords
-            - Generic requests with no specific conditions
-        """
-        msg_lower = message.lower().strip()
-
-        # Extremely short and no keywords → clarify
-        if len(msg_lower) < 10:
-            has_keyword = any(kw in msg_lower for kw in _GENRE_KEYWORDS + _PRICE_KEYWORDS)
-            if not has_keyword:
-                return True
-
-        return False
-
-    # ------------------------------------------------------------------
-    #  Tool chain
-    # ------------------------------------------------------------------
-
-    async def _run_tool_chain(self, message: str, settings: dict = None) -> list[dict]:
+    # [职责] 输入消息 + 设置 + 意图 → 编排工具调用 → 返回合并去重后的游戏列表
+    async def _run_tool_chain(
+        self, message: str, settings: dict = None, intent: dict = None
+    ) -> list[dict]:
         """
         Dispatch the message to the appropriate tool(s) and return results.
 
-        Intent routing logic:
-            - "类似XX" / semantic description → semantic_search_tool
-            - concrete filters (price, tags, review) → game_filter_tool
-            - "XX游戏多少钱" / price check → steam_store_tool
-            - Combo: filter + semantic can both run
-
-        *settings* — user preferences from the settings modal, used to
-                     bias tool‑chain parameters when the message itself
-                     doesn't specify concrete constraints.
+        All tool calls go through this method.  Sync tools (GameFilterTool,
+        SemanticSearchTool) are run via ``asyncio.to_thread()`` to avoid
+        blocking the event loop.  SteamStoreTool is natively async.
         """
         if settings is None:
             settings = {}
         results: list[dict] = []
-        msg_lower = message.lower()
 
-        # --- Detect semantic search intent ---------------------------------
-        has_similar = any(kw in msg_lower for kw in _SIMILAR_KEYWORDS)
-        has_genre_desc = any(kw in msg_lower for kw in _GENRE_KEYWORDS) and not any(
-            kw in msg_lower for kw in _PRICE_KEYWORDS
-        )
+        # intent is always provided by _detect_intent — no more fallback path
+        action = intent.get("action", "search") if intent else "search"
+        search_query = intent.get("search_query", message) if intent else message
+        filters = intent.get("filters", {}) if intent else {}
+        tags = filters.get("tags") or []
+        exclude_tags = filters.get("exclude_tags") or []
+        max_price = filters.get("max_price")
+        min_review = filters.get("min_review")
+        is_multiplayer = filters.get("is_multiplayer")
+        limit = filters.get("limit", 10)
 
-        if has_similar or has_genre_desc:
-            semantic_results = self.semantic_tool.run(message)
+        # Merge settings defaults into filters (intent takes priority)
+        if max_price is None and settings.get("budget"):
+            max_price = float(settings["budget"])
+        if not tags and settings.get("genres"):
+            tags = list(settings["genres"])
+        if is_multiplayer is None and settings.get("platforms"):
+            if "多人" in settings["platforms"] and "单机" not in settings["platforms"]:
+                is_multiplayer = True
+            elif "单机" in settings["platforms"] and "多人" not in settings["platforms"]:
+                is_multiplayer = False
+
+        # [修改] 原因：同步工具调用改为 asyncio.to_thread()，避免阻塞事件循环
+        # Semantic search
+        if action in ("search", "mixed"):
+            semantic_results = await asyncio.to_thread(
+                self.semantic_tool.run, search_query, limit
+            )
             results.extend(semantic_results)
 
-        # --- Detect filter intent ------------------------------------------
-        has_price = any(kw in msg_lower for kw in _PRICE_KEYWORDS)
-        has_multi = any(kw in msg_lower for kw in ["多人", "联机", "和朋友", "在线", "单机"])
-        has_review = any(kw in msg_lower for kw in ["好评", "评分", "口碑"])
+        # Filter
+        if action in ("filter", "mixed"):
+            filter_params = {
+                "max_price": max_price, "min_review": min_review,
+                "tags": tags, "exclude_tags": exclude_tags,
+                "is_multiplayer": is_multiplayer, "limit": limit,
+            }
+            has_conditions = any([
+                max_price is not None, min_review is not None,
+                tags, exclude_tags, is_multiplayer is not None,
+            ])
+            if has_conditions:
+                filter_results = await asyncio.to_thread(
+                    self.filter_tool.run, filter_params
+                )
+                results.extend(filter_results)
 
-        if has_price or has_multi or has_review:
-            params: dict = {"limit": 10}
+        # Price check (already async — no change needed)
+        if action == "price_check":
+            similar_to = filters.get("similar_to", "")
+            game_name = similar_to or message
+            game_name = re.sub(r"^(类似|像|类)\s*", "", game_name)
+            steam_result = await self.steam_tool.run(game_name)
+            if "error" not in steam_result:
+                results.append(steam_result)
 
-            # Price extraction (from message)
-            price_match = re.search(r"(\d+)\s*(?:块|元|¥|￥)", message)
-            if price_match:
-                params["max_price"] = float(price_match.group(1))
-            elif "免费" in msg_lower:
-                params["max_price"] = 0.0
-            elif "便宜" in msg_lower:
-                params["max_price"] = 50.0
-            # Fall back to settings budget
-            elif settings.get("budget"):
-                params["max_price"] = float(settings["budget"])
-
-            # Multiplayer detection
-            if any(kw in msg_lower for kw in ["多人", "联机", "和朋友", "在线"]):
-                params["is_multiplayer"] = True
-            elif "单机" in msg_lower:
-                params["is_multiplayer"] = False
-            # Fall back to settings platform
-            elif settings.get("platforms"):
-                if "多人" in settings["platforms"] and "单机" not in settings["platforms"]:
-                    params["is_multiplayer"] = True
-                elif "单机" in settings["platforms"] and "多人" not in settings["platforms"]:
-                    params["is_multiplayer"] = False
-
-            # Tags from settings genres
-            if settings.get("genres"):
-                params["tags"] = settings["genres"]
-
-            # Review threshold
-            if any(kw in msg_lower for kw in ["好评", "口碑"]):
-                params["min_review"] = 0.8
-
-            filter_results = self.filter_tool.run(params)
-            results.extend(filter_results)
-
-        # --- Detect price‑check intent -------------------------------------
-        price_check_match = re.search(r"(.+?)(?:多少钱|价格|什么价|贵不贵|打折)", message)
-        if price_check_match:
-            game_name = price_check_match.group(1).strip()
-            if game_name and len(game_name) > 1:
-                steam_result = await self.steam_tool.run(game_name)
-                if "error" not in steam_result:
-                    results.append(steam_result)
-
-        # --- Fallback: if no tool matched, run semantic search anyway -------
-        if not results:
-            semantic_results = self.semantic_tool.run(message)
+        # Fallback: if no results, try semantic search with raw message
+        if not results and action != "clarify":
+            semantic_results = await asyncio.to_thread(
+                self.semantic_tool.run, message
+            )
             results.extend(semantic_results)
 
-        # --- Apply settings bias when no explicit filter matched ------------
-        # If the user didn't say "price"/"multiplayer" etc. but HAS settings,
-        # apply the filter tool with settings-derived parameters.
-        if not has_price and not has_multi and not has_review and settings:
-            filter_params: dict = {"limit": 5}
-            applied = False
-            if settings.get("budget"):
-                filter_params["max_price"] = float(settings["budget"])
-                applied = True
-            if settings.get("genres"):
-                filter_params["tags"] = settings["genres"]
-                applied = True
-            if settings.get("platforms"):
-                if "多人" in settings["platforms"] and "单机" not in settings["platforms"]:
-                    filter_params["is_multiplayer"] = True
-                    applied = True
-                elif "单机" in settings["platforms"] and "多人" not in settings["platforms"]:
-                    filter_params["is_multiplayer"] = False
-                    applied = True
-            if applied:
-                extra = self.filter_tool.run(filter_params)
-                for g in extra:
-                    if g["name"] not in {r.get("name") for r in results}:
-                        results.append(g)
-
-        # Deduplicate by name
+        # ==================================================================
+        #  Common post‑processing: deduplicate and limit
+        # ==================================================================
         seen: set[str] = set()
         unique: list[dict] = []
         for r in results:
@@ -510,29 +538,71 @@ class AgentRunner:
 
         return unique[:5]
 
-    # ------------------------------------------------------------------
-    #  Formatting
-    # ------------------------------------------------------------------
+    def _build_steam_summary(self, session_id: str) -> str:
+        """[职责] 读取 _steam_profiles → 生成 Steam 用户画像文本，供系统提示词使用。
 
-    @staticmethod
-    def _format_user_settings(settings: dict) -> str:
-        """Build a human‑readable settings summary for the system prompt."""
-        if not settings:
+        Returns empty string if no Steam data has been synced for this session.
+        """
+        steam = self._steam_profiles.get(session_id, {})
+        if not steam or not steam.get("success"):
             return ""
+
         parts = []
-        budget = settings.get("budget")
-        if budget:
-            parts.append(f"预算上限 {budget} 元")
-        genres = settings.get("genres", [])
-        if genres:
-            parts.append(f"偏好类型：{'、'.join(genres)}")
-        platforms = settings.get("platforms", [])
-        if platforms:
-            parts.append(f"平台偏好：{'、'.join(platforms)}")
+        persona = steam.get("persona_name", "")
+        game_count = steam.get("game_count", 0)
+        top_genres = steam.get("top_genres", [])
+        recent_games = steam.get("recent_games", [])
+        total_playtime_min = steam.get("total_playtime_min", 0)
+        account_age_days = steam.get("account_age_days", 0)
+        loccountrycode = steam.get("loccountrycode", "")
+        top_games = steam.get("top_games_by_playtime", [])
+
+        if persona:
+            parts.append(f"Steam 昵称：{persona}")
+        # [新增] 账号年龄 — 判定玩家深度
+        if account_age_days and account_age_days > 0:
+            years = account_age_days // 365
+            if years > 0:
+                parts.append(f"Steam 账号注册约 {years} 年（老玩家）")
+            else:
+                parts.append(f"Steam 账号注册不到 1 年（新玩家）")
+        if loccountrycode:
+            parts.append(f"所在地区：{loccountrycode}")
+        if game_count:
+            parts.append(f"游戏库共 {game_count} 款游戏")
+        if total_playtime_min and total_playtime_min > 0:
+            total_hours = round(total_playtime_min / 60)
+            parts.append(f"游戏总时长约 {total_hours} 小时")
+        # [新增] 游玩时长排名 Top 5
+        if top_games:
+            top5_str = "、".join(
+                f'{g["name"]}({g["playtime_hours"]}h)' for g in top_games[:5]
+            )
+            parts.append(f"游玩时长最多的游戏：{top5_str}")
+        if top_genres:
+            parts.append(f"根据游戏库分析，用户偏好类型：{'、'.join(top_genres[:5])}")
+        if recent_games:
+            recent_names = [g.get("name", "") for g in recent_games[:5] if g.get("name")]
+            if recent_names:
+                # [新增] 附带近两周时长
+                recent_with_hours = []
+                for g in recent_games[:5]:
+                    name = g.get("name", "")
+                    two_weeks_min = g.get("playtime_2weeks", 0)
+                    if name:
+                        recent_with_hours.append(
+                            f'{name}({round(two_weeks_min/60, 1)}h)' if two_weeks_min > 0 else name
+                        )
+                parts.append(f"最近两周在玩：{'、'.join(recent_with_hours)}")
+
         if not parts:
             return ""
-        return "## 用户在设置面板中的偏好\n" + "\n".join(f"- {p}" for p in parts) + \
-               "\n\n请优先根据以上偏好进行推荐。如果用户当前提问与偏好冲突，以当前提问为准。"
+
+        return "## Steam 个人游戏库\n" + "\n".join(f"- {p}" for p in parts) + \
+               "\n\n请优先结合用户的 Steam 游戏库偏好进行推荐。推荐时注意：\n" \
+               "- 如果用户是多年老玩家，优先推荐深度作品或冷门佳作\n" \
+               "- 参考用户游玩时长最长的游戏类型，推荐同类型或精神续作\n" \
+               "- 结合最近两周在玩的游戏判断用户当前兴趣方向"
 
     def _format_tool_results(self, results: list[dict]) -> str:
         """Convert tool results into a compact text block for the LLM.

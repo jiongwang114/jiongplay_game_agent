@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ---- 配置（按需修改）----------------------------------------------------------
-GITHUB_REPO="https://github.com/你的用户名/你的仓库名.git"   # ← 替换为你的仓库地址
+GITHUB_REPO="git@github.com:jiongwang114/jiongplay_game_agent.git"
 PROJECT_DIR="$HOME/steam-game-agent"
 BRANCH="main"
 

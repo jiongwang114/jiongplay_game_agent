@@ -1,34 +1,47 @@
 # =============================================================================
-#  Steam 游戏推荐 Agent — Docker Compose 部署
+#  Steam 游戏推荐 Agent — Docker Compose 云服务器部署
 # =============================================================================
-#  启动：  docker compose up -d
-#  查看：  docker compose logs -f
-#  停止：  docker compose down
-#  更新：  docker compose build --no-cache && docker compose up -d
+#  首次部署:
+#      cp .env.example .env && nano .env    # 填入 API Key
+#      docker compose up -d --build
+#
+#  常用命令:
+#      docker compose logs -f               # 实时日志
+#      docker compose restart               # 重启
+#      docker compose down                  # 停止
+#      docker compose up -d --build         # 更新代码并重建
+#      docker compose exec game-agent /bin/bash  # 进入容器调试
 # =============================================================================
 
 services:
   game-agent:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: steam-game-agent
     ports:
-      - "8000:8000"
+      - "${PORT:-80}:8000"    # 外部端口通过环境变量 PORT 控制，默认 80
     env_file:
-      - .env
+      - .env                  # API Key 等敏感配置，不提交到 Git
     environment:
-      # 容器内数据路径（无需修改）
       - DB_PATH=/app/data/sqlite/games.db
       - VECTOR_PATH=/app/data/vector_index
     volumes:
-      # 持久化游戏数据库 & 向量索引（容器重建后数据不丢失）
+      # 持久化数据：即使容器被删除，游戏数据库、向量索引、用户数据不会丢失
       - game_data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
-      timeout: 3s
+      timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
+    # 限制资源（可选，按需取消注释）
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+    #       cpus: '2'
 
 volumes:
   game_data:

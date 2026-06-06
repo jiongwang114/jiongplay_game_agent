@@ -18,6 +18,40 @@
  */
 
 // =========================================================================
+//  SECTION 0: Theme Management (Day / Night)
+// =========================================================================
+
+var THEME_KEY = "steam_agent_theme";
+
+function getTheme() {
+    var stored = localStorage.getItem(THEME_KEY);
+    return stored || "dark";
+}
+
+function setTheme(theme) {
+    theme = theme || "dark";
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem(THEME_KEY, theme);
+
+    // Update toggle button active states
+    var lightBtn = document.getElementById("theme-light-btn");
+    var darkBtn = document.getElementById("theme-dark-btn");
+    if (lightBtn && darkBtn) {
+        if (theme === "light") {
+            lightBtn.classList.add("active");
+            darkBtn.classList.remove("active");
+        } else {
+            darkBtn.classList.add("active");
+            lightBtn.classList.remove("active");
+        }
+    }
+}
+
+function initTheme() {
+    setTheme(getTheme());
+}
+
+// =========================================================================
 //  SECTION 1: Session Management
 // =========================================================================
 
@@ -150,7 +184,7 @@ function appendUserMessage(text) {
         '</div>' +
         '<div class="max-w-[85%] md:max-w-[70%]">' +
         '  <p class="text-xs text-gray-400 mb-1.5 mr-1 font-medium text-right">你</p>' +
-        '  <div class="bg-steam-light/80 p-4 rounded-2xl rounded-tr-none text-white text-[15px] shadow-md backdrop-blur-sm border border-steam-accent/20">' +
+        '  <div class="bg-[#1a2d3d] p-4 rounded-2xl rounded-tr-none text-white text-[15px] shadow-md border border-steam-accent/20">' +
              escapeHtml(text) +
         '  </div>' +
         '</div>';
@@ -200,10 +234,13 @@ function showTypingIndicator() {
         '<div class="w-10 h-10 rounded-full bg-gradient-to-br from-steam-accent to-blue-600 flex items-center justify-center flex-shrink-0">' +
         '  <i class="fa-solid fa-robot text-white text-sm"></i>' +
         '</div>' +
-        '<div class="bg-steam-panel px-5 py-4 rounded-2xl rounded-tl-none border border-steam-light flex items-center gap-1.5">' +
-        '  <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
-        '  <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
-        '  <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
+        '<div class="flex flex-col gap-1.5">' +
+        '  <div class="bg-steam-panel px-5 py-3 rounded-2xl rounded-tl-none border border-steam-light flex items-center gap-1.5">' +
+        '    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
+        '    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
+        '    <div class="w-2 h-2 bg-steam-accent rounded-full typing-dot"></div>' +
+        '  </div>' +
+        '  <p id="typing-progress" class="text-xs text-gray-500 ml-1 hidden"></p>' +
         '</div>';
 
     chatContainer.appendChild(wrapper);
@@ -556,21 +593,18 @@ async function handleSend() {
             return;
         }
 
-        // Remove typing indicator, create empty AI bubble
-        removeTypingIndicator();
-        aiMessageWrapper = appendAITextMessage("");
-        var textContent = aiMessageWrapper.querySelector(".ai-text-content");
-
-        // --- Read SSE stream with throttled DOM updates ---
-        // Without throttling, when tokens arrive fast (same TCP packet) the
-        // browser batches all innerHTML writes into a single paint frame,
-        // which makes streaming look like a one-shot dump.
+        // --- Read SSE stream ---
+        // Keep the typing indicator visible while the backend pre‑processes
+        // (profile extraction, tool‑chain game search, prompt construction).
+        // Only remove it when the first real content token arrives.
         var reader = response.body.getReader();
         var decoder = new TextDecoder();
         var buffer = "";
         var lastPaint = 0;
         var PAINT_INTERVAL_MS = 40;  // update DOM at most every 40 ms
         var ended = false;
+        var firstToken = true;
+        var progressEl = document.getElementById("typing-progress");
 
         while (!ended) {
             var readResult = await reader.read();
@@ -590,6 +624,27 @@ async function handleSend() {
                 if (payload === "[DONE]") {
                     ended = true;
                     break;
+                }
+
+                // --- Handle progress messages from the backend ---
+                // Backend yields "__PROGRESS__<message>" while it pre‑processes
+                // so the SSE stream has data flowing immediately.
+                if (payload.indexOf("__PROGRESS__") === 0) {
+                    var progressMsg = payload.slice(12);
+                    if (progressEl) {
+                        progressEl.textContent = progressMsg;
+                        progressEl.classList.remove("hidden");
+                    }
+                    continue;  // don't add to fullText or render as content
+                }
+
+                // --- First real token → swap typing indicator for AI bubble ---
+                if (firstToken) {
+                    removeTypingIndicator();
+                    aiMessageWrapper = appendAITextMessage("");
+                    var textContent = aiMessageWrapper.querySelector(".ai-text-content");
+                    progressEl = null;  // old progress element is gone
+                    firstToken = false;
                 }
 
                 var token = payload.replace(/\\n/g, "\n");
@@ -613,8 +668,15 @@ async function handleSend() {
         }
 
         // Final render — always show the complete text
-        textContent.innerHTML = renderMarkdown(fullText);
-        scrollToBottom();
+        if (!firstToken) {
+            textContent.innerHTML = renderMarkdown(fullText);
+            scrollToBottom();
+        } else {
+            // Stream ended with only progress messages (no real content) —
+            // e.g. backend error was caught.  Clean up and show fallback.
+            removeTypingIndicator();
+            aiMessageWrapper = appendAITextMessage("抱歉，未能生成回复。请再试一次。");
+        }
 
         // ================================================================
         //  AFTER STREAM: fetch structured game data & filter by mention
@@ -626,7 +688,7 @@ async function handleSend() {
                 var allGames = data.games || [];
                 // Only show cards for games the AI actually talked about
                 var relevantGames = filterGamesByMention(allGames, fullText);
-                if (relevantGames.length > 0) {
+                if (relevantGames.length > 0 && aiMessageWrapper) {
                     appendGameCardsToMessage(aiMessageWrapper, relevantGames);
                 }
             }
@@ -707,6 +769,72 @@ function applyAuthUI(user) {
     }
 }
 
+/**
+ * Call /api/user/link to restore all user data after login / page-load.
+ * Then update the UI: chat history, Steam data, preferences, settings.
+ */
+async function restoreUserState(token) {
+    if (!token) return;
+    try {
+        var res = await fetch("/api/user/link", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: SESSION_ID, token: token }),
+        });
+        var data = await res.json();
+        if (!data.success) return;
+
+        // 1. Restore past conversations into the chat UI
+        if (data.conversations && data.conversations.length > 0) {
+            restoreConversationsToUI(data.conversations);
+        }
+
+        // 2. Restore Steam profile → sidebar
+        if (data.steam_profile && data.steam_profile.success) {
+            isSteamConnected = true;
+            isSteamSimulated = false;
+            updateSidebarStatus(data.steam_profile);
+            // Restore Steam ID
+            if (data.steam_profile.steam_id) {
+                savedSteamId = data.steam_profile.steam_id;
+                localStorage.setItem("steam_agent_steam_id", savedSteamId);
+            }
+            // Update sync button
+            setSyncUI(syncBtn, syncIcon, syncText, "bg-green-600", "fa-check", false,
+                      "已接入 Steam 库");
+            setSyncUI(mobileSyncBtn, mobileSyncIcon, mobileSyncText, "bg-green-600", "fa-check", false,
+                      "已接入 Steam 库");
+        }
+
+        // 3. Restore settings → localStorage + sidebar
+        if (data.settings) {
+            saveSettingsToStorage(data.settings);
+            updateSidebarPrefDisplay(data.settings);
+            updatePrefsDisplaySection(data.settings);
+        }
+    } catch (err) {
+        console.warn("Failed to restore user state:", err);
+    }
+}
+
+/**
+ * Render past conversations in the chat UI.
+ * Called after login restores history from the server.
+ */
+function restoreConversationsToUI(conversations) {
+    if (!conversations || conversations.length === 0) return;
+    // Clear any existing welcome message first (the chat container may have
+    // the default empty-state message). We keep it simple: just append history.
+    for (var i = 0; i < conversations.length; i++) {
+        var msg = conversations[i];
+        if (msg.role === "user") {
+            appendUserMessage(msg.content);
+        } else if (msg.role === "assistant") {
+            appendAITextMessage(msg.content);
+        }
+    }
+}
+
 function openAuthModal(mode) {
     mode = mode || "login";
     authMode = mode;
@@ -761,6 +889,14 @@ async function handleAuthSubmit() {
         if (errorEl) { errorEl.textContent = "请填写用户名和密码"; errorEl.classList.remove("hidden"); }
         return;
     }
+    if (username.length < 2) {
+        if (errorEl) { errorEl.textContent = "用户名至少需要 2 个字符"; errorEl.classList.remove("hidden"); }
+        return;
+    }
+    if (password.length < 4) {
+        if (errorEl) { errorEl.textContent = "密码至少需要 4 个字符"; errorEl.classList.remove("hidden"); }
+        return;
+    }
 
     if (submitBtn) {
         submitBtn.disabled = true;
@@ -784,14 +920,16 @@ async function handleAuthSubmit() {
             applyAuthUI(currentUser);
             showToast((authMode === "login" ? "欢迎回来，" : "注册成功，") + currentUser.username + "！", "success");
 
-            // Also validate token in background
-            if (authMode === "login") {
-                // Update sidebar with any previously saved settings
-                var savedSettings = loadSettings();
-                if (savedSettings.genres.length > 0 || savedSettings.budget || savedSettings.platforms.length > 0) {
-                    updateSidebarPrefDisplay(savedSettings);
-                    updatePrefsDisplaySection(savedSettings);
-                }
+            // RESTORE all user data from server (conversations, Steam, preferences, settings)
+            restoreUserState(authToken);
+
+            // Also sync any local settings to the server
+            var savedSettings = loadSettings();
+            if (savedSettings.genres.length > 0 || savedSettings.budget || savedSettings.platforms.length > 0) {
+                updateSidebarPrefDisplay(savedSettings);
+                updatePrefsDisplaySection(savedSettings);
+                // Push to server
+                syncSettingsToServer(savedSettings);
             }
         } else {
             if (errorEl) { errorEl.textContent = data.error || "操作失败"; errorEl.classList.remove("hidden"); }
@@ -815,6 +953,20 @@ async function validateAuthToken() {
         if (data.success) {
             currentUser = data.user;
             applyAuthUI(currentUser);
+            // Restore all user data from server (conversations, Steam, preferences)
+            await restoreUserState(authToken);
+
+            // Also restore settings from server if present
+            if (data.user.settings_json) {
+                try {
+                    var serverSettings = JSON.parse(data.user.settings_json);
+                    if (serverSettings) {
+                        saveSettingsToStorage(serverSettings);
+                        updateSidebarPrefDisplay(serverSettings);
+                        updatePrefsDisplaySection(serverSettings);
+                    }
+                } catch (e) {}
+            }
         } else {
             // Token expired or invalid
             authToken = "";
@@ -831,26 +983,35 @@ async function validateAuthToken() {
 // =========================================================================
 
 var isSyncing = false;
-var isSteamConnected = false;
+var isSteamConnected = false;       // true ONLY when real Steam API data is loaded (not simulated)
+var isSteamSimulated = false;       // true when simulated/demo data is loaded
 var savedSteamId = localStorage.getItem("steam_agent_steam_id") || "";
 
 /** Update sidebar status indicators (used by both desktop and mobile). */
 function updateSidebarStatus(data) {
+    var isReal = data.success && !data.is_simulated;
+
     // Data source badge
-    function setDataBadge(el, text, isConnected) {
+    function setDataBadge(el, text, isRealSteam) {
         if (!el) return;
         el.textContent = text;
-        if (isConnected) {
-            el.classList.remove("bg-gray-800");
+        // Reset all state classes first
+        el.classList.remove("bg-gray-800", "bg-green-600/20", "text-green-400", "bg-yellow-600/20", "text-yellow-400");
+        if (isRealSteam) {
             el.classList.add("bg-green-600/20", "text-green-400");
+        } else if (data.is_simulated) {
+            el.classList.add("bg-yellow-600/20", "text-yellow-400");
+        } else {
+            el.classList.add("bg-gray-800");
         }
     }
-    setDataBadge(dataStatus, data.success ? "已接入 Steam 库" : "本地数据库", data.success);
-    setDataBadge(document.getElementById("mobile-data-status"), data.success ? "已接入 Steam 库" : "本地数据库", data.success);
+    setDataBadge(dataStatus, isReal ? "已接入 Steam 库" : (data.is_simulated ? "模拟 Steam 数据" : "本地数据库"), isReal);
+    setDataBadge(document.getElementById("mobile-data-status"), isReal ? "已接入 Steam 库" : (data.is_simulated ? "模拟 Steam 数据" : "本地数据库"), isReal);
 
     // Top genres → preference bias
     if (data.top_genres && data.top_genres.length > 0) {
         var genreText = data.top_genres.slice(0, 2).join(" / ");
+        if (data.is_simulated) genreText = "⚠️ " + genreText + " (模拟)";
         if (prefStatus) prefStatus.textContent = genreText;
         var mobilePref = document.getElementById("mobile-pref-status");
         if (mobilePref) mobilePref.textContent = genreText;
@@ -864,8 +1025,8 @@ function updateSidebarStatus(data) {
         if (mobileThought) mobileThought.innerHTML = thoughtHtml;
     }
 
-    // Confidence boost if real data
-    if (data.success && data.game_count > 0) {
+    // Confidence boost if real data (simulated data doesn't boost confidence)
+    if (data.success && data.game_count > 0 && !data.is_simulated) {
         if (confidenceStatus) confidenceStatus.textContent = Math.min(95, 70 + Math.floor(data.game_count / 20)) + "%";
         var mobileConf = document.getElementById("mobile-confidence-status");
         if (mobileConf) mobileConf.textContent = Math.min(95, 70 + Math.floor(data.game_count / 20)) + "%";
@@ -888,11 +1049,11 @@ function updateSidebarStatus(data) {
 /** Helper to set sync button UI (both desktop and mobile). */
 function setSyncUI(btn, icon, text, btnClass, iconClass, spin, label) {
     if (btn) {
-        btn.classList.remove("bg-steam-light", "bg-gray-600", "bg-green-600");
+        btn.classList.remove("bg-steam-light", "bg-gray-600", "bg-green-600", "bg-yellow-600");
         btn.classList.add(btnClass);
     }
     if (icon) {
-        icon.classList.remove("fa-steam", "fa-spinner", "fa-check", "fa-spin");
+        icon.classList.remove("fa-steam", "fa-spinner", "fa-check", "fa-exclamation-triangle", "fa-spin");
         icon.classList.add(iconClass);
         if (spin) icon.classList.add("fa-spin");
     }
@@ -912,60 +1073,95 @@ async function doSyncSteam(steamId) {
         var res = await fetch("/api/sync-steam", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id: SESSION_ID, steam_id: steamId || "" }),
+            body: JSON.stringify({ session_id: SESSION_ID, steam_id: steamId || "", token: authToken || "" }),
         });
 
         if (!res.ok) throw new Error("Sync failed");
 
         var data = await res.json();
 
-        if (data.success) {
-            // Success
+        if (data.success && !data.is_simulated) {
+            // ================================================================
+            //  REAL Steam API data — green success
+            // ================================================================
             setSyncUI(syncBtn, syncIcon, syncText, "bg-green-600", "fa-check", false,
                       data.message || ("同步完成 (库中 " + data.game_count + " 款游戏)"));
             setSyncUI(mobileSyncBtn, mobileSyncIcon, mobileSyncText, "bg-green-600", "fa-check", false,
                       data.message || ("同步完成 (库中 " + data.game_count + " 款游戏)"));
 
             isSteamConnected = true;
+            isSteamSimulated = false;
             updateSidebarStatus(data);
 
-            // Save Steam ID if it worked
-            if (steamId && data.success) {
+            // Save Steam ID
+            if (steamId) {
                 localStorage.setItem("steam_agent_steam_id", steamId);
                 savedSteamId = steamId;
             }
 
-            // AI proactive message — use real analysis if available
+            // AI proactive message with real analysis
             setTimeout(function () {
                 showTypingIndicator();
                 setTimeout(function () {
                     removeTypingIndicator();
                     var msg;
                     if (data.persona_name && data.top_genres && data.top_genres.length > 0) {
-                        msg = "已成功接入你的 Steam 账号 <strong>" + escapeHtml(data.persona_name) +
-                              "</strong>！你的游戏库中有 <strong>" + data.game_count +
-                              " 款</strong>游戏，偏好类型是 <strong>" +
+                        msg = "已成功接入你的 Steam 账号 **" + escapeHtml(data.persona_name) +
+                              "**！你的游戏库中有 **" + data.game_count +
+                              " 款**游戏，偏好类型是 **" +
                               data.top_genres.slice(0, 2).join("、") +
-                              "</strong>。想让我基于你的真实游戏记录做推荐吗？直接告诉我你想玩什么类型的！";
+                              "**。想让我基于你的真实游戏记录做推荐吗？直接告诉我你想玩什么类型的！";
                     } else {
-                        msg = "我已经分析了你的 Steam 游戏库。<strong>" + data.game_count +
-                              " 款</strong>游戏，偏好 <strong>" +
+                        msg = "我已经分析了你的 Steam 游戏库。**" + data.game_count +
+                              " 款**游戏，偏好 **" +
                               (data.top_genres && data.top_genres.length > 0 ? data.top_genres.slice(0, 2).join("、") : "多种类型") +
-                              "</strong>。想找点什么？";
+                              "**。想找点什么？";
                     }
                     appendAITextMessage(msg);
                     scrollToBottom();
                 }, 1200);
             }, 500);
+
+        } else if (data.success && data.is_simulated) {
+            // ================================================================
+            //  SIMULATED data — yellow/orange warning, NOT green
+            // ================================================================
+            setSyncUI(syncBtn, syncIcon, syncText, "bg-yellow-600", "fa-exclamation-triangle", false,
+                      "模拟数据 (142 款) — 点击接入真实 Steam");
+            setSyncUI(mobileSyncBtn, mobileSyncIcon, mobileSyncText, "bg-yellow-600", "fa-exclamation-triangle", false,
+                      "模拟数据 (142 款) — 点击接入真实 Steam");
+
+            // CRITICAL: do NOT set isSteamConnected = true for simulated data
+            isSteamConnected = false;
+            isSteamSimulated = true;
+            updateSidebarStatus(data);
+
+            // AI proactive message — make it clear this is simulated
+            setTimeout(function () {
+                showTypingIndicator();
+                setTimeout(function () {
+                    removeTypingIndicator();
+                    var msg = "⚠️ 当前使用的是**模拟数据**（142 款游戏，偏好 FPS/开放世界RPG 等）。" +
+                              "如果你有 Steam 账号，点击侧边栏按钮**输入你的 Steam ID**，" +
+                              "我就能分析你的真实游戏库，给你更精准的推荐！";
+                    appendAITextMessage(msg);
+                    scrollToBottom();
+                }, 1200);
+            }, 500);
+
         } else {
-            // API returned success=false
+            // API returned success=false — reset button for retry
             setSyncUI(syncBtn, syncIcon, syncText, "bg-steam-light", "fa-steam", false, "接入 Steam 游戏库");
             setSyncUI(mobileSyncBtn, mobileSyncIcon, mobileSyncText, "bg-steam-light", "fa-steam", false, "接入 Steam 游戏库");
+            isSteamConnected = false;
+            isSteamSimulated = false;
             showToast("❌ " + (data.message || "同步失败"), "error");
         }
     } catch (err) {
         setSyncUI(syncBtn, syncIcon, syncText, "bg-steam-light", "fa-steam", false, "接入 Steam 游戏库");
         setSyncUI(mobileSyncBtn, mobileSyncIcon, mobileSyncText, "bg-steam-light", "fa-steam", false, "接入 Steam 游戏库");
+        isSteamConnected = false;
+        isSteamSimulated = false;
         console.error("Steam sync error:", err);
         showToast("❌ 网络错误，请稍后重试", "error");
     } finally {
@@ -975,8 +1171,18 @@ async function doSyncSteam(steamId) {
 
 /** Click handler for sync buttons — opens the Steam ID modal. */
 async function syncSteamData() {
-    if (isSyncing || isSteamConnected) return;
+    // Only prevent during active sync; allow re-sync after simulated data or real data
+    if (isSyncing) return;
 
+    // If already connected with real Steam data, ask for confirmation
+    if (isSteamConnected) {
+        // Re-clicking when already connected — allow re-syncing (maybe user changed Steam ID)
+        // Just open the modal again
+        openSteamIdModal();
+        return;
+    }
+
+    // If we have simulated data, allow trying real sync
     // If we already have a saved Steam ID, sync directly
     if (savedSteamId) {
         await doSyncSteam(savedSteamId);
@@ -998,6 +1204,32 @@ function openSteamIdModal() {
     if (input && savedSteamId) input.value = savedSteamId;
     modal.classList.remove("hidden");
     document.body.style.overflow = "hidden";
+
+    // Check Steam API connectivity in the background
+    var statusEl = document.getElementById("steam-api-status");
+    if (statusEl) {
+        statusEl.classList.remove("hidden");
+        statusEl.className = "text-xs mb-4 p-2 rounded-lg bg-gray-800 text-gray-400";
+        statusEl.textContent = "正在检查 Steam API 连通性...";
+        fetch("/api/steam-check")
+            .then(function (r) { return r.json(); })
+            .then(function (s) {
+                if (s.api_key_valid) {
+                    statusEl.className = "text-xs mb-4 p-2 rounded-lg bg-green-600/20 text-green-400";
+                    statusEl.innerHTML = '<i class="fa-solid fa-check-circle"></i> ' + s.detail;
+                } else if (s.api_reachable && !s.api_key_valid) {
+                    statusEl.className = "text-xs mb-4 p-2 rounded-lg bg-red-600/20 text-red-400";
+                    statusEl.innerHTML = '<i class="fa-solid fa-times-circle"></i> ' + s.detail;
+                } else {
+                    statusEl.className = "text-xs mb-4 p-2 rounded-lg bg-yellow-600/20 text-yellow-400";
+                    statusEl.innerHTML = '<i class="fa-solid fa-exclamation-triangle"></i> ' + s.detail;
+                }
+            })
+            .catch(function () {
+                statusEl.className = "text-xs mb-4 p-2 rounded-lg bg-yellow-600/20 text-yellow-400";
+                statusEl.textContent = "无法检查 Steam API 状态，请确保服务已启动";
+            });
+    }
 }
 
 function closeSteamIdModal() {
@@ -1126,7 +1358,30 @@ function saveSettings() {
     updateSidebarPrefDisplay(settings);
     updatePrefsDisplaySection(settings);
 
+    // Persist to server if logged in (so settings follow the user account)
+    syncSettingsToServer(settings);
+
     showToast("偏好设置已保存 ✓", "success");
+}
+
+/**
+ * Push local settings to the server so they persist across devices.
+ */
+async function syncSettingsToServer(settings) {
+    if (!authToken) return;
+    try {
+        await fetch("/api/user/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                session_id: SESSION_ID,
+                token: authToken,
+                settings: settings,
+            }),
+        });
+    } catch (e) {
+        // Non-fatal — settings are still in localStorage
+    }
 }
 
 /**
@@ -1243,15 +1498,15 @@ function closeLogoutModal() {
 }
 
 function confirmLogout() {
-    // Clear server-side auth token
+    // Clear server-side auth token and unlink session
     if (authToken) {
         fetch("/api/auth/logout?token=" + encodeURIComponent(authToken), { method: "POST" }).catch(function () {});
+        // Unlink session from user on server (keeps DB data intact for next login)
+        fetch("/api/user/unlink?session_id=" + encodeURIComponent(SESSION_ID), { method: "POST" }).catch(function () {});
     }
 
-    // Clear session
-    localStorage.removeItem("steam_agent_session_id");
-    localStorage.removeItem(SETTINGS_KEY);
-    localStorage.removeItem("steam_agent_steam_id");
+    // Clear auth-specific items but KEEP session_id and steam_id
+    // — so the browser can resume conversations on re-login
     localStorage.removeItem(AUTH_TOKEN_KEY);
     savedSteamId = "";
     authToken = "";
@@ -1287,11 +1542,11 @@ function confirmLogout() {
     // Reset sync button
     function resetSyncBtn(btn, icon, text) {
         if (btn) {
-            btn.classList.remove("bg-gray-600", "bg-green-600");
+            btn.classList.remove("bg-gray-600", "bg-green-600", "bg-yellow-600");
             btn.classList.add("bg-steam-light");
         }
         if (icon) {
-            icon.classList.remove("fa-spinner", "fa-spin", "fa-check");
+            icon.classList.remove("fa-spinner", "fa-spin", "fa-check", "fa-exclamation-triangle");
             icon.classList.add("fa-steam");
         }
         if (text) text.textContent = "接入 Steam 游戏库";
@@ -1299,12 +1554,14 @@ function confirmLogout() {
     resetSyncBtn(syncBtn, syncIcon, syncText);
     resetSyncBtn(mobileSyncBtn, mobileSyncIcon, mobileSyncText);
     isSteamConnected = false;
+    isSteamSimulated = false;
     isSyncing = false;
 
     closeLogoutModal();
     showToast("已安全退出，会话已清除 👋", "info");
 
-    // Regenerate session ID
+    // Regenerate session ID for a fresh chat context,
+    // but DON'T delete old one — past conversations are linked to user_id in DB
     var newId = "sess_" + Math.random().toString(36).substring(2, 10);
     localStorage.setItem("steam_agent_session_id", newId);
 
@@ -1425,7 +1682,7 @@ function appendUserImageMessage(dataUrl, filename) {
         '</div>' +
         '<div class="max-w-[85%] md:max-w-[70%]">' +
         '  <p class="text-xs text-gray-400 mb-1.5 mr-1 font-medium text-right">你</p>' +
-        '  <div class="bg-steam-light/80 p-2 rounded-2xl rounded-tr-none shadow-md backdrop-blur-sm border border-steam-accent/20">' +
+        '  <div class="bg-[#1a2d3d] p-2 rounded-2xl rounded-tr-none shadow-md border border-steam-accent/20">' +
         '    <img src="' + dataUrl + '" alt="' + escapeHtml(filename) + '" class="max-w-[300px] max-h-[300px] rounded-lg object-cover">' +
         '    <p class="text-xs text-gray-400 mt-1">' + escapeHtml(filename) + '</p>' +
         '  </div>' +
@@ -1469,6 +1726,9 @@ chatContainer.addEventListener("click", function (e) {
 // =========================================================================
 
 function init() {
+    // --- Apply saved theme (day/night) ---
+    initTheme();
+
     // --- Start real-time agent status SSE subscription ---
     startAgentStatusSubscription();
 
@@ -1594,6 +1854,15 @@ function init() {
         updateSidebarPrefDisplay(savedSettings);
         updatePrefsDisplaySection(savedSettings);
     }
+
+    // --- Escape key closes any open modal ---
+    document.addEventListener("keydown", function (e) {
+        if (e.key !== "Escape") return;
+        closeAuthModal();
+        closeSettingsModal();
+        closeLogoutModal();
+        closeSteamIdModal();
+    });
 
     // Show DB stats on startup (non-blocking)
     fetch("/api/db-stats")

@@ -3,7 +3,7 @@
 import os
 from typing import Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from data_layer.schema import Base, Conversation, Game, User
@@ -28,6 +28,66 @@ class GameDB:
     def init_tables(self) -> None:
         """Create all tables if they don't exist."""
         Base.metadata.create_all(self.engine)
+
+        # ------------------------------------------------------------------
+        #  Migration: ensure users.token has a NON-UNIQUE index.
+        #
+        #  Earlier versions had ``unique=True`` on the token column, but
+        #  multiple users must be allowed to have an empty token (logged-out
+        #  state).  SQLAlchemy's ``create_all`` does NOT alter existing
+        #  tables, so we drop the old unique index and recreate it as plain.
+        # ------------------------------------------------------------------
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("DROP INDEX IF EXISTS ix_users_token"))
+                conn.commit()
+            with self.engine.connect() as conn:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_token ON users (token)"))
+                conn.commit()
+        except Exception:
+            pass  # Table may not exist yet — harmless
+
+        # ------------------------------------------------------------------
+        #  Migration: add persistent user data columns to users table
+        #  (steam_id, steam_profile_json, preferences_json, settings_json)
+        # ------------------------------------------------------------------
+        user_new_cols = [
+            ("steam_id", "TEXT DEFAULT ''"),
+            ("steam_profile_json", "TEXT DEFAULT ''"),
+            ("preferences_json", "TEXT DEFAULT ''"),
+            ("settings_json", "TEXT DEFAULT ''"),
+        ]
+        for col_name, col_def in user_new_cols:
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(text(
+                        f"ALTER TABLE users ADD COLUMN {col_name} {col_def}"
+                    ))
+                    conn.commit()
+            except Exception:
+                pass  # Column already exists — harmless
+
+        # ------------------------------------------------------------------
+        #  Migration: add user_id column to conversations table
+        # ------------------------------------------------------------------
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE conversations ADD COLUMN user_id INTEGER DEFAULT NULL"
+                ))
+                conn.commit()
+        except Exception:
+            pass  # Column already exists — harmless
+
+        # Index on conversations.user_id for fast user-history queries
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_conversations_user_id ON conversations (user_id)"
+                ))
+                conn.commit()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     #  CRUD
@@ -118,14 +178,42 @@ class GameDB:
         self.session.commit()
 
     # ------------------------------------------------------------------
+    #  User profile persistence (Steam / preferences / settings)
+    # ------------------------------------------------------------------
+
+    def save_user_steam_profile(self, user_id: int, steam_id: str, profile_json: str):
+        """Persist Steam profile data to the user record."""
+        user = self.session.query(User).filter(User.id == user_id).first()
+        if user:
+            user.steam_id = steam_id
+            user.steam_profile_json = profile_json
+            self.session.commit()
+
+    def save_user_preferences(self, user_id: int, preferences_json: str):
+        """Persist LLM-extracted preferences to the user record."""
+        user = self.session.query(User).filter(User.id == user_id).first()
+        if user:
+            user.preferences_json = preferences_json
+            self.session.commit()
+
+    def save_user_settings(self, user_id: int, settings_json: str):
+        """Persist user settings (budget, genres, platforms) to the user record."""
+        user = self.session.query(User).filter(User.id == user_id).first()
+        if user:
+            user.settings_json = settings_json
+            self.session.commit()
+
+    # ------------------------------------------------------------------
     #  Conversation helpers
     # ------------------------------------------------------------------
 
-    def add_conversation(self, session_id: str, role: str, content: str):
-        """Persist a single chat message."""
+    def add_conversation(self, session_id: str, role: str, content: str,
+                         user_id: int = None):
+        """Persist a single chat message, optionally tied to a user account."""
         import time
         msg = Conversation(
             session_id=session_id,
+            user_id=user_id,
             role=role,
             content=content,
             created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -138,6 +226,20 @@ class GameDB:
         rows = (
             self.session.query(Conversation)
             .filter(Conversation.session_id == session_id)
+            .order_by(Conversation.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(rows))
+
+    def get_conversations_by_user(self, user_id: int, limit: int = 50) -> list[Conversation]:
+        """
+        Return recent messages for a user account, across all sessions.
+        Used to restore chat history when user re-logs in.
+        """
+        rows = (
+            self.session.query(Conversation)
+            .filter(Conversation.user_id == user_id)
             .order_by(Conversation.id.desc())
             .limit(limit)
             .all()

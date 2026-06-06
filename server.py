@@ -5,6 +5,7 @@ Start with:
     uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ from data_layer.auth import AuthManager
 #  App setup
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Steam 游戏推荐 Agent", version="0.1.0")
+app = FastAPI(title="Steam 游戏推荐 智能体", version="0.1.0")
 
 # Mount the frontend static directory
 frontend_dir = PROJECT_ROOT / "frontend"
@@ -58,6 +59,7 @@ class SyncSteamRequest(BaseModel):
     session_id: str
     steam_id: str = ""          # Steam 64-bit ID or vanity‑URL name
     include_played_free: bool = True
+    token: str = ""             # Auth token — used to persist Steam data to user record
 
 
 class AuthRequest(BaseModel):
@@ -109,7 +111,6 @@ async def chat(req: ChatRequest):
                 yield f"data: {safe}\n\n"
                 # Explicitly yield control so uvicorn flushes each chunk
                 # rather than buffering multiple SSE events into one TCP packet.
-                import asyncio
                 await asyncio.sleep(0)
             yield "data: [DONE]\n\n"
         except Exception as e:
@@ -177,12 +178,80 @@ async def auth_me(token: str = ""):
 
 
 # ---------------------------------------------------------------------------
+#  User data persistence endpoints (link session → account, sync settings)
+# ---------------------------------------------------------------------------
+
+class LinkUserRequest(BaseModel):
+    session_id: str = ""
+    token: str = ""
+
+@app.post("/api/user/link")
+async def user_link(req: LinkUserRequest):
+    """
+    Link a browser session to a user account, and restore all persisted data.
+
+    Call this right after login or on page load with a valid token.
+    Returns past conversations, Steam profile, preferences, and settings
+    so the frontend can restore the user's state.
+    """
+    if not req.token or not req.session_id:
+        return {"success": False, "error": "缺少 session_id 或 token"}
+    user = _auth.get_user_by_token(req.token)
+    if not user:
+        return {"success": False, "error": "token 无效或已过期"}
+    result = _agent.link_user(req.session_id, user.id)
+    # Attach user info for frontend
+    result["user"] = user.to_dict()
+    return result
+
+
+@app.post("/api/user/unlink")
+async def user_unlink(session_id: str = ""):
+    """Unlink a session from its user account (called on logout)."""
+    if session_id:
+        _agent.unlink_user(session_id)
+    return {"success": True}
+
+
+class SaveSettingsRequest(BaseModel):
+    session_id: str = ""
+    token: str = ""
+    settings: dict = {}
+
+@app.post("/api/user/settings")
+async def user_save_settings(req: SaveSettingsRequest):
+    """
+    Save user settings (budget, genres, platforms) to the DB.
+    This way settings follow the user across devices, not just localStorage.
+    """
+    if not req.token:
+        return {"success": False, "error": "未登录"}
+    user = _auth.get_user_by_token(req.token)
+    if not user:
+        return {"success": False, "error": "token 无效"}
+    _agent.save_user_settings_to_db(user.id, req.settings)
+    # Also link the session for future persistence
+    if req.session_id:
+        _agent.link_user(req.session_id, user.id)
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
 #  Sidebar support endpoints
 # ---------------------------------------------------------------------------
 
 # Steam Web API helpers
 STEAM_API_KEY = os.getenv("STEAM_API_KEY", "")
 STEAM_API_BASE = "https://api.steampowered.com"
+
+# ---- Logging ----
+import logging
+_logger = logging.getLogger("steam_agent")
+_logger.setLevel(logging.DEBUG)
+if not _logger.handlers:
+    _ch = logging.StreamHandler()
+    _ch.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    _logger.addHandler(_ch)
 
 
 async def _resolve_steam_id(steam_id: str) -> str | None:
@@ -192,20 +261,27 @@ async def _resolve_steam_id(steam_id: str) -> str | None:
         return None
     # Already a 64‑bit numeric ID?
     if steam_id.strip().isdigit() and len(steam_id.strip()) == 17:
+        _logger.info(f"Steam ID 已是64位格式: {steam_id.strip()}")
         return steam_id.strip()
 
     # Try resolving as a vanity name
     try:
         async with httpx.AsyncClient(timeout=10) as client:
+            _logger.info(f"正在解析 vanity URL: {steam_id.strip()}")
             resp = await client.get(
                 f"{STEAM_API_BASE}/ISteamUser/ResolveVanityURL/v1/",
                 params={"key": STEAM_API_KEY, "vanityurl": steam_id.strip()},
             )
             data = resp.json().get("response", {})
+            _logger.info(f"Vanity URL 解析响应: {data}")
             if data.get("success") == 1:
-                return data.get("steamid")
-    except Exception:
-        pass
+                resolved = data.get("steamid")
+                _logger.info(f"Vanity URL 解析成功 → Steam ID: {resolved}")
+                return resolved
+            else:
+                _logger.warning(f"Vanity URL 解析失败: {data.get('message', '未知错误')}")
+    except Exception as e:
+        _logger.error(f"Vanity URL 解析网络错误: {e}")
     return None
 
 
@@ -218,33 +294,47 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
               "games": [], "recent_games": [], "top_genres": [],
               "recent_playtime_analysis": "", "message": ""}
 
+    if not STEAM_API_KEY:
+        result["message"] = "Steam API Key 未配置，请在 .env 中设置 STEAM_API_KEY"
+        _logger.error(result["message"])
+        return result
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             # 1. Player summary
+            _logger.info(f"正在获取玩家摘要: steam_id={steam_id}")
             summary_resp = await client.get(
                 f"{STEAM_API_BASE}/ISteamUser/GetPlayerSummaries/v2/",
                 params={"key": STEAM_API_KEY, "steamids": steam_id},
             )
-            players = summary_resp.json().get("response", {}).get("players", [])
+            summary_json = summary_resp.json()
+            _logger.info(f"GetPlayerSummaries 响应状态: {summary_resp.status_code}, 内容: {str(summary_json)[:200]}")
+            players = summary_json.get("response", {}).get("players", [])
             if not players:
-                result["message"] = "未找到该 Steam 用户的公开信息"
+                result["message"] = "未找到该 Steam 用户的公开信息（请确保你的 Steam 个人资料隐私设置为「公开」）"
+                _logger.warning(result["message"])
                 return result
             player = players[0]
             result["persona_name"] = player.get("personaname", "Unknown")
             result["avatar_url"] = player.get("avatarfull", "")
+            _logger.info(f"玩家昵称: {result['persona_name']}")
 
             # 2. Owned games
+            _logger.info(f"正在获取游戏库: steam_id={steam_id}")
             games_resp = await client.get(
                 f"{STEAM_API_BASE}/IPlayerService/GetOwnedGames/v1/",
                 params={"key": STEAM_API_KEY, "steamid": steam_id,
                         "include_appinfo": True, "include_played_free_games": True},
             )
-            games_data = games_resp.json().get("response", {})
+            games_json = games_resp.json()
+            games_data = games_json.get("response", {})
             owned = games_data.get("games", [])
             result["game_count"] = games_data.get("game_count", len(owned))
             result["games"] = sorted(owned, key=lambda g: g.get("playtime_forever", 0), reverse=True)[:50]
+            _logger.info(f"游戏库获取成功: {result['game_count']} 款游戏")
 
             # 3. Recently played (last 2 weeks)
+            _logger.info(f"正在获取最近游玩记录: steam_id={steam_id}")
             recent_resp = await client.get(
                 f"{STEAM_API_BASE}/IPlayerService/GetRecentlyPlayedGames/v1/",
                 params={"key": STEAM_API_KEY, "steamid": steam_id, "count": 10},
@@ -252,6 +342,7 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
             recent_data = recent_resp.json().get("response", {})
             recent = recent_data.get("games", [])
             result["recent_games"] = recent
+            _logger.info(f"最近游玩: {len(recent)} 款")
 
             # 4. Analyse
             total_playtime = sum(g.get("playtime_forever", 0) for g in owned)
@@ -290,11 +381,22 @@ async def _fetch_steam_profile(steam_id: str) -> dict:
             result["recent_playtime_analysis"] = "；".join(parts) if parts else "分析完成"
 
             result["success"] = True
+            result["is_simulated"] = False
             result["message"] = f"数据同步完成 (库中 {result['game_count']} 款游戏)"
+            _logger.info(f"Steam 真实同步完成: {result['persona_name']}, {result['game_count']} 款游戏")
             return result
 
+    except httpx.ConnectError as e:
+        result["message"] = f"无法连接到 Steam API 服务器（网络不通或被屏蔽）：{e}"
+        _logger.error(result["message"])
+        return result
+    except httpx.TimeoutException as e:
+        result["message"] = f"Steam API 请求超时，请检查网络或稍后重试：{e}"
+        _logger.error(result["message"])
+        return result
     except Exception as e:
         result["message"] = f"Steam API 请求失败：{e}"
+        _logger.error(f"Steam API 异常: {type(e).__name__}: {e}")
         return result
 
 
@@ -308,14 +410,22 @@ async def sync_steam(req: SyncSteamRequest):
     - If *steam_id* is empty, falls back to simulated data with a hint to
       provide a real Steam ID for personalised results.
     """
-    import asyncio
-
     # ---- Real Steam API path ------------------------------------------------
     if req.steam_id.strip():
+        _logger.info(f"收到真实 Steam 同步请求: steam_id={req.steam_id.strip()}, session={req.session_id}")
+
+        # If user is logged in, link the session so Steam data persists to DB
+        if req.token:
+            user = _auth.get_user_by_token(req.token)
+            if user:
+                _agent.link_user(req.session_id, user.id)
+
         resolved = await _resolve_steam_id(req.steam_id.strip())
         if not resolved:
+            _logger.warning(f"Steam ID 解析失败: {req.steam_id.strip()}")
             return {
                 "success": False,
+                "is_simulated": False,
                 "game_count": 0,
                 "top_genres": [],
                 "recent_playtime_analysis": "",
@@ -325,13 +435,18 @@ async def sync_steam(req: SyncSteamRequest):
         profile = await _fetch_steam_profile(resolved)
         if profile["success"]:
             _agent.set_steam_profile(req.session_id, profile)
+            _logger.info(f"Steam 真实同步成功: session={req.session_id}")
+        else:
+            _logger.warning(f"Steam 真实同步失败: {profile.get('message')}")
         return profile
 
     # ---- Fallback: no Steam ID provided ------------------------------------
+    _logger.info(f"模拟数据同步: session={req.session_id} (未提供 Steam ID)")
     await asyncio.sleep(0.8)
 
     return {
         "success": True,
+        "is_simulated": True,
         "game_count": 142,
         "top_genres": ["FPS", "开放世界RPG", "独立游戏", "策略"],
         "recent_playtime_analysis": (
@@ -474,6 +589,66 @@ async def db_stats():
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/steam-check")
+async def steam_check():
+    """
+    Verify Steam API key connectivity.
+
+    Returns whether the Steam Web API is reachable and the key is valid.
+    Call this on startup or from the settings panel to diagnose sync issues.
+    """
+    import httpx
+
+    result = {
+        "api_key_configured": bool(STEAM_API_KEY),
+        "api_reachable": False,
+        "api_key_valid": False,
+        "detail": "",
+    }
+
+    if not STEAM_API_KEY:
+        result["detail"] = "STEAM_API_KEY 未在 .env 中配置"
+        return result
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Use GetPlayerSummaries with a known public Steam ID as a smoke test
+            test_steam_id = "76561197960287930"  # Gabe Newell's Steam ID (public)
+            resp = await client.get(
+                f"{STEAM_API_BASE}/ISteamUser/GetPlayerSummaries/v2/",
+                params={"key": STEAM_API_KEY, "steamids": test_steam_id},
+            )
+            data = resp.json()
+            response_obj = data.get("response", {})
+
+            if resp.status_code == 200 and "players" in response_obj:
+                result["api_reachable"] = True
+                result["api_key_valid"] = True
+                result["detail"] = "Steam API 连通正常，Key 有效 ✓"
+                _logger.info("Steam API 连通性检查: 正常")
+            elif resp.status_code == 403:
+                result["api_reachable"] = True
+                result["api_key_valid"] = False
+                result["detail"] = "Steam API Key 无效（403 Forbidden），请到 https://steamcommunity.com/dev/apikey 重新申请"
+                _logger.warning("Steam API 连通性检查: Key 无效 (403)")
+            else:
+                result["api_reachable"] = True
+                result["api_key_valid"] = False
+                result["detail"] = f"Steam API 返回异常状态码 {resp.status_code}: {str(data)[:200]}"
+                _logger.warning(f"Steam API 连通性检查: 状态码 {resp.status_code}")
+    except httpx.ConnectError as e:
+        result["detail"] = f"无法连接 Steam API 服务器（网络不通或被屏蔽）: {e}"
+        _logger.error(f"Steam API 连通性检查: 连接失败 - {e}")
+    except httpx.TimeoutException:
+        result["detail"] = "Steam API 连接超时，请检查网络"
+        _logger.error("Steam API 连通性检查: 超时")
+    except Exception as e:
+        result["detail"] = f"检查失败: {type(e).__name__}: {e}"
+        _logger.error(f"Steam API 连通性检查: {e}")
+
+    return result
 
 
 @app.get("/api/tool-results/{session_id}")

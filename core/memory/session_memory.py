@@ -44,11 +44,13 @@ class SessionMemory:
     #  Public API
     # ------------------------------------------------------------------
 
-    def add(self, session_id: str, role: str, content: str) -> None:
+    def add(self, session_id: str, role: str, content: str, user_id: int = None) -> None:
         """
         Append a message to the session history.
 
         *role* should be ``"user"`` or ``"assistant"``.
+        *user_id* — when provided, the message is linked to that user account
+                    so it can be restored across sessions.
         """
         self._ensure_loaded(session_id)
         self._store[session_id].append({"role": role, "content": content})
@@ -61,7 +63,7 @@ class SessionMemory:
         # Persist to DB
         if self._db:
             try:
-                self._db.add_conversation(session_id, role, content)
+                self._db.add_conversation(session_id, role, content, user_id=user_id)
             except Exception:
                 pass  # DB write failures are non‑fatal
 
@@ -76,6 +78,22 @@ class SessionMemory:
         self._ensure_loaded(session_id)
         history = self._store.get(session_id, [])
         return history[-(max_turns * 2):]
+
+    def load_user_history(self, user_id: int, limit: int = 50) -> list[dict]:
+        """
+        Load conversation history for a user from the database (across all sessions).
+
+        Returns a list of ``{"role": …, "content": …}`` dicts for frontend display.
+        Does NOT modify the in‑memory cache — callers should call ``add()`` to
+        re-populate the current session if they want the LLM to use it.
+        """
+        if not self._db:
+            return []
+        try:
+            rows = self._db.get_conversations_by_user(user_id, limit=limit)
+            return [{"role": r.role, "content": r.content} for r in rows]
+        except Exception:
+            return []
 
     def clear(self, session_id: str) -> None:
         """Remove all history for a session (memory + DB)."""

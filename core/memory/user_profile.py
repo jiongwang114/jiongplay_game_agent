@@ -39,6 +39,9 @@ class UserProfile:
     structured preferences from the user's message and merges them into
     the session-specific profile.
 
+    When a user account is linked, preferences are also persisted to SQLite
+    so they survive server restarts and re-logins.
+
     Keyed by *user_key* (typically ``session_id``) so that concurrent
     conversations don't pollute each other's preferences.
     """
@@ -55,6 +58,8 @@ class UserProfile:
         """*llm_engine* — an ``LLMEngine`` instance for extraction calls."""
         self._llm = llm_engine
         self._profiles: dict[str, dict] = {}  # user_key → profile dict
+        self._db = None  # GameDB instance, set by AgentRunner
+        self._linked_user_ids: dict[str, int] = {}  # user_key → user_id
 
     # ------------------------------------------------------------------
     #  Public API
@@ -71,6 +76,62 @@ class UserProfile:
                 "mood": None,
             }
         return self._profiles[user_key]
+
+    def get_profile(self, user_key: str) -> dict:
+        """Public getter — return a copy of the profile for *user_key*."""
+        return dict(self._get_profile(user_key))
+
+    def link_user(self, user_key: str, user_id: int) -> None:
+        """Associate a session with a user account for persistence."""
+        self._linked_user_ids[user_key] = user_id
+
+    def unlink_user(self, user_key: str) -> None:
+        """Remove the user association for a session."""
+        self._linked_user_ids.pop(user_key, None)
+
+    def load_from_db(self, user_key: str, user_id: int) -> None:
+        """
+        Restore preferences from the user's DB record into memory.
+        Called after login to recover previously extracted preferences.
+        """
+        if not self._db:
+            return
+        from data_layer.schema import User
+        try:
+            user = self._db.session.query(User).filter(User.id == user_id).first()
+        except Exception:
+            return
+        if not user or not user.preferences_json:
+            return
+        try:
+            saved = json.loads(user.preferences_json)
+            if isinstance(saved, dict):
+                profile = self._get_profile(user_key)
+                for key in profile:
+                    if key in saved and saved[key]:
+                        if key in ("genres", "owned_games", "platforms"):
+                            existing = set(profile[key])
+                            for item in saved[key]:
+                                if isinstance(item, str) and item not in existing:
+                                    profile[key].append(item)
+                        elif key in ("budget", "mood"):
+                            if saved[key] is not None:
+                                profile[key] = saved[key]
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    def _persist_if_linked(self, user_key: str) -> None:
+        """Write the profile to SQLite if this session is linked to a user."""
+        if not self._db:
+            return
+        user_id = self._linked_user_ids.get(user_key)
+        if not user_id:
+            return
+        try:
+            profile = self._get_profile(user_key)
+            self._db.save_user_preferences(user_id, json.dumps(profile, ensure_ascii=False))
+        except Exception:
+            pass  # Persistence failures are non‑fatal
 
     async def extract_and_update(self, user_key: str, message: str) -> None:
         """
@@ -104,6 +165,9 @@ class UserProfile:
             elif key in ("budget", "mood"):
                 if new_val is not None:
                     profile[key] = new_val
+
+        # Persist to DB if this session is linked to a user account
+        self._persist_if_linked(user_key)
 
     def get_summary(self, user_key: str) -> str:
         """

@@ -27,8 +27,8 @@ build/
 !README.md
 
 # ---- Docker 自身文件 ----
-Dockerfile
-docker-compose.yml
+# 注意：Dockerfile 和 docker-compose.yml 不能放入 .dockerignore
+# 否则 docker compose build 会失败，因为 Docker 找不到 Dockerfile
 .dockerignore
 
 # ---- 运行时日志（每次启动重建）----

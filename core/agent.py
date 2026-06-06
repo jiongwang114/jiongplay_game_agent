@@ -61,6 +61,7 @@ class AgentRunner:
         self.db = GameDB()
         self.memory = SessionMemory(db=self.db)
         self.profile = UserProfile(self.llm)
+        self.profile._db = self.db  # Enable DB persistence for preferences
         self.vector_store = VectorStore()
 
         # Tools
@@ -80,6 +81,9 @@ class AgentRunner:
 
         # Per‑session Steam profile data (populated by /api/sync-steam)
         self._steam_profiles: dict[str, dict] = {}
+
+        # Per‑session linked user_id — enables persistence across re-logins
+        self._session_users: dict[str, int] = {}
 
         # SSE status push — one asyncio.Queue per session
         self._status_queues: dict[str, "asyncio.Queue"] = {}
@@ -151,6 +155,113 @@ class AgentRunner:
             preference_bias=profile.get("top_genre", ""),
             confidence=78,
         )
+        # Persist to DB if this session is linked to a user account
+        self._persist_steam_to_db(session_id, profile)
+
+    # ------------------------------------------------------------------
+    #  User account linking (enables data persistence across re-logins)
+    # ------------------------------------------------------------------
+
+    def link_user(self, session_id: str, user_id: int) -> dict:
+        """
+        Associate *session_id* with a user account.
+
+        Returns a dict with the restored user state so the frontend can
+        update its UI: past conversations, Steam profile, preferences,
+        and settings.
+        """
+        self._session_users[session_id] = user_id
+        self.profile.link_user(session_id, user_id)
+
+        result: dict = {
+            "success": True,
+            "user_id": user_id,
+            "conversations": [],
+            "steam_profile": None,
+            "preferences": None,
+            "settings": None,
+        }
+
+        # 1. Restore past conversations (across all sessions)
+        try:
+            result["conversations"] = self.memory.load_user_history(
+                user_id, limit=50
+            )
+        except Exception:
+            pass
+
+        # 2. Restore Steam profile from DB
+        try:
+            from data_layer.schema import User
+            user = self.db.session.query(User).filter(User.id == user_id).first()
+            if user and user.steam_profile_json:
+                import json
+                steam = json.loads(user.steam_profile_json)
+                if steam.get("steam_id"):
+                    self._steam_profiles[session_id] = steam
+                    result["steam_profile"] = steam
+                    self._update_status(
+                        session_id,
+                        data_source="Steam 在线同步",
+                        agent_thought="已分析你的 Steam 游戏库，等待你的提问...",
+                        preference_bias=steam.get("top_genre", ""),
+                        confidence=78,
+                    )
+        except Exception:
+            pass
+
+        # 3. Restore LLM-extracted preferences
+        try:
+            self.profile.load_from_db(session_id, user_id)
+            result["preferences"] = self.profile.get_profile(session_id)
+        except Exception:
+            pass
+
+        # 4. Restore user settings
+        try:
+            from data_layer.schema import User
+            user = self.db.session.query(User).filter(User.id == user_id).first()
+            if user and user.settings_json:
+                import json
+                result["settings"] = json.loads(user.settings_json)
+        except Exception:
+            pass
+
+        return result
+
+    def unlink_user(self, session_id: str) -> None:
+        """Remove the user association for a session (on logout)."""
+        self._session_users.pop(session_id, None)
+        self.profile.unlink_user(session_id)
+        self._steam_profiles.pop(session_id, None)
+
+    def get_session_user_id(self, session_id: str) -> int | None:
+        """Return the user_id linked to *session_id*, or None."""
+        return self._session_users.get(session_id)
+
+    def _persist_steam_to_db(self, session_id: str, profile: dict) -> None:
+        """Save Steam profile to the linked user's DB record."""
+        user_id = self._session_users.get(session_id)
+        if not user_id or not profile.get("success"):
+            return
+        import json
+        try:
+            steam_id = profile.get("steam_id", "")
+            self.db.save_user_steam_profile(
+                user_id, steam_id, json.dumps(profile, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+
+    def save_user_settings_to_db(self, user_id: int, settings: dict) -> None:
+        """Persist user settings (budget, genres, platforms) to the DB."""
+        import json
+        try:
+            self.db.save_user_settings(
+                user_id, json.dumps(settings, ensure_ascii=False)
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     #  Streaming entry point
@@ -175,8 +286,16 @@ class AgentRunner:
             settings = {}
         self._init_status(session_id)
 
+        # Determine linked user_id for persistence
+        user_id = self._session_users.get(session_id)
+
         # 1. Save user message to history
-        self.memory.add(session_id, "user", message)
+        self.memory.add(session_id, "user", message, user_id=user_id)
+
+        # Yield progress immediately so the SSE stream has data flowing
+        # while we do pre‑processing.  The frontend uses __PROGRESS__ to
+        # update the typing indicator instead of showing a blank bubble.
+        yield "__PROGRESS__正在分析你的需求..."
 
         # Phase: analyzing
         self._update_status(session_id, phase="analyzing",
@@ -188,9 +307,13 @@ class AgentRunner:
         # 3. Decide: clarify or run tools
         if self._should_ask_clarification(message):
             tool_results = ""
+            yield "__PROGRESS__需要了解更多细节..."
             self._update_status(session_id, phase="clarifying",
                                 agent_thought="需要更多信息，准备追问...")
         else:
+            # Yield progress before the (potentially slow) tool chain
+            yield "__PROGRESS__正在检索游戏库..."
+
             # Phase: searching
             self._update_status(session_id, phase="searching",
                                 agent_thought="正在检索游戏库和 Steam 实时数据...")
@@ -199,6 +322,8 @@ class AgentRunner:
             tool_results = self._format_tool_results(tool_context)
 
             found_count = len(tool_context)
+            yield f"__PROGRESS__已检索到 {found_count} 款匹配游戏，正在生成推荐..."
+
             self._update_status(
                 session_id, phase="generating",
                 agent_thought=f"已检索到 {found_count} 款匹配游戏，正在生成推荐...",
@@ -230,7 +355,7 @@ class AgentRunner:
 
         # 7. Save assistant response to history
         full_response = "".join(response_chunks)
-        self.memory.add(session_id, "assistant", full_response)
+        self.memory.add(session_id, "assistant", full_response, user_id=user_id)
 
         # Phase: done
         self._update_status(session_id, phase="idle",

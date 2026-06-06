@@ -33,9 +33,15 @@ class User(Base):
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     username: str = Column(String(64), unique=True, index=True, nullable=False)
     password_hash: str = Column(String(256), nullable=False)
-    token: str = Column(String(128), unique=True, index=True, default="")   # auth token
+    token: str = Column(String(128), index=True, default="")   # auth token (no unique — collisions are astronomically unlikely for 128-bit random hex)
     avatar_seed: str = Column(String(64), default="")                       # DiceBear seed
     created_at: str = Column(String(32), default="")
+
+    # ---- Persistent user data (survives restarts & re-logins) ----
+    steam_id: str = Column(String(64), default="")              # Steam 64-bit ID
+    steam_profile_json: str = Column(String(8192), default="")  # Full Steam API response as JSON
+    preferences_json: str = Column(String(4096), default="")    # LLM-extracted preferences {genres, budget, owned_games, platforms, mood}
+    settings_json: str = Column(String(2048), default="")       # User settings {budget, genres, platforms}
 
     def to_dict(self) -> dict:
         return {
@@ -43,16 +49,21 @@ class User(Base):
             "username": self.username,
             "avatar_seed": self.avatar_seed,
             "created_at": self.created_at,
+            "steam_id": self.steam_id,
+            "steam_profile_json": self.steam_profile_json,
+            "preferences_json": self.preferences_json,
+            "settings_json": self.settings_json,
         }
 
 
 class Conversation(Base):
-    """Persistent chat history per session."""
+    """Persistent chat history per session, optionally tied to a user account."""
 
     __tablename__ = "conversations"
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
     session_id: str = Column(String(64), index=True, nullable=False)
+    user_id: int = Column(Integer, index=True, nullable=True, default=None)  # FK to users.id — allows loading history across sessions
     role: str = Column(String(16), nullable=False)         # "user" or "assistant"
     content: str = Column(String(8192), nullable=False)
     created_at: str = Column(String(32), default="")
